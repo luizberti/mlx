@@ -1,0 +1,21 @@
+.{
+    .name = .mal,
+    .fingerprint = 0x87acf6f48579c43b,
+    .minimum_zig_version = "0.16.0",
+    .version = "0.0.1",
+    .dependencies = .{
+        .mlx = .{
+            .url = "git+https://github.com/ml-explore/mlx.git?ref=v0.31.2#68cf2fddd8de5edd8ab3d926391772b2e2cedad8",
+            .hash = "N-V-__8AAGkamgBpHapZtWSxTCvyaU1k3bHj1ZN4bOw4dSRC",
+        },
+        .mlxc = .{
+            .url = "git+https://github.com/ml-explore/mlx-c.git#fba4470b89073180056c9ea46c443051375f7399",
+            .hash = "N-V-__8AAOwcCgCGMf5BjoUXoCOz0o4rx5_jLUDStuAswvKy",
+        },
+        .@"metal-cpp" = .{
+            .url = "https://developer.apple.com/metal/cpp/files/metal-cpp_26.zip",
+            .hash = "N-V-__8AAKorGQAhnadXWLnod9VtLpm5GxAh4yhSBLdm7Eag",
+        },
+    },
+    .paths = .{""},
+}
