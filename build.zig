@@ -1,14 +1,9 @@
 const std = @import("std");
 
 pub fn build(b: *std.Build) void {
+    const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
-    const target = b.standardTargetOptions(.{
-        .default_target = .{
-            // Pin pre-bf16 baseline so __ARM_FEATURE_BF16 stays off in *every* TU: upstream then uses its
-            // struct bfloat16_t (native __bf16 lacks the cross-type conversions array.h needs). Global = ABI-consistent.
-            .cpu_model = .{ .explicit = &std.Target.aarch64.cpu.apple_m1 },
-        },
-    });
+
     const metal = b.option(bool, "metal", "Metal GPU backend (CPU backend is always built)") orelse false;
     const cuda = b.option(bool, "cuda", "CUDA GPU backend (reserved, not wired up yet)") orelse false;
     const jit = b.option(bool, "jit", "JIT Metal kernels at runtime (smaller metallib)") orelse false;
@@ -21,10 +16,11 @@ pub fn build(b: *std.Build) void {
     if (jaccl and target.result.os.tag != .macos) @panic("-Djaccl needs a macOS target");
 
     const tests = b.step("test", "Run test suite");
+    tests.dependOn(b.getInstallStep());
 
+    const fmt = b.dependency("fmt", .{});
     const mlx = b.dependency("mlx", .{});
     const mlxc = b.dependency("mlxc", .{});
-    const fmt = b.dependency("fmt", .{});
 
     const command = mlx.path("mlx/backend/cpu/make_compiled_preamble.sh");
     const codegen = b.addSystemCommand(&.{command.getPath(b)});
@@ -33,29 +29,31 @@ pub fn build(b: *std.Build) void {
     codegen.addDirectoryArg(mlx.path(""));
     codegen.addArgs(&.{ "TRUE", "arm64" });
 
+    // MARK: LIBMLX
     const libmlx = b.addLibrary(.{
         .name = "mlx",
         .linkage = .static,
         .root_module = b.createModule(.{
             .target = target,
             .optimize = optimize,
-            // metal-cpp's NS::SharedPtr does null->release() (a runtime no-op via objc_msgSend(nil));
-            // UBSan traps the technically-UB null member-call. Upstream builds without UBSan.
-            .sanitize_c = .off,
+            .sanitize_c = .off, // NOTE: upstream builds without UB sanitizer
         }),
     });
+    libmlx.root_module.addIncludePath(mlx.path(""));
+    libmlx.root_module.addIncludePath(fmt.path("include"));
+    libmlx.root_module.addCMacro("MLX_VERSION", "\"0.31.2\"");
     libmlx.root_module.addCMacro("MLX_STATIC", "");
     libmlx.root_module.addCMacro("MLX_USE_ACCELERATE", "");
     libmlx.root_module.addCMacro("ACCELERATE_NEW_LAPACK", "");
     libmlx.root_module.addCMacro("FMT_HEADER_ONLY", "");
-    libmlx.root_module.addCMacro("MLX_VERSION", "\"0.31.2\"");
-    if (metal) libmlx.root_module.addCMacro("METAL_PATH", b.fmt("\"{s}\"", .{b.getInstallPath(.bin, "mlx.metallib")}));
+    if (metal) libmlx.root_module.addCMacro(
+        "METAL_PATH",
+        b.fmt("\"{s}\"", .{b.getInstallPath(.bin, "mlx.metallib")}),
+    );
 
     // NOTE: In JIT mode NAX is always built and gated at runtime by `is_nax_available()`
     if (metal and !jit and !nax) libmlx.root_module.addCMacro("MLX_METAL_NO_NAX", "");
 
-    libmlx.root_module.addIncludePath(mlx.path(""));
-    libmlx.root_module.addIncludePath(fmt.path("include"));
     if (metal) if (b.lazyDependency("metal-cpp", .{})) |metalcpp| {
         libmlx.root_module.addIncludePath(metalcpp.path(""));
     };
@@ -72,33 +70,32 @@ pub fn build(b: *std.Build) void {
     if (metal) appendCpp(b, libmlx.root_module, mlx, "mlx/backend/metal", &.{ "no_metal.cpp", if (jit) "nojit_kernels.cpp" else "jit_kernels.cpp" }) catch @panic("append");
     if (!metal) libmlx.root_module.addCSourceFile(.{
         .file = mlx.path("mlx/backend/metal/no_metal.cpp"),
-        .flags = &.{"-std=c++20"},
+        .flags = cxxflags,
         .language = .cpp,
     });
     appendCpp(b, libmlx.root_module, mlx, "mlx/distributed", &.{}) catch @panic("append");
     appendCpp(b, libmlx.root_module, mlx, "mlx/distributed/ring", &.{if (ring) "no_ring.cpp" else "ring.cpp"}) catch @panic("append");
     appendCpp(b, libmlx.root_module, mlx, "mlx/distributed/jaccl", &.{if (jaccl) "no_jaccl.cpp" else "jaccl.cpp"}) catch @panic("append");
-    // jaccl proper: vendored in-tree by mlx, dlopens librdma.dylib at runtime (no link-time dep).
     if (jaccl) appendCpp(b, libmlx.root_module, mlx, "mlx/distributed/jaccl/lib/jaccl", &.{}) catch @panic("append");
     libmlx.root_module.addCSourceFiles(.{
         .root = mlx.path(""),
         .files = &mlx_sources,
-        .flags = &.{"-std=c++20"},
+        .flags = cxxflags,
         .language = .cpp,
     });
     libmlx.root_module.addCSourceFile(.{
         .file = preamble,
-        .flags = &.{"-std=c++20"},
+        .flags = cxxflags,
         .language = .cpp,
     });
     if (metal) for (preambles) |name| libmlx.root_module.addCSourceFile(.{
         .file = embed(b, mlx, name),
-        .flags = &.{"-std=c++20"},
+        .flags = cxxflags,
         .language = .cpp,
     });
     if (metal and jit) for (jit_preambles) |name| libmlx.root_module.addCSourceFile(.{
         .file = embed(b, mlx, name),
-        .flags = &.{"-std=c++20"},
+        .flags = cxxflags,
         .language = .cpp,
     });
     libmlx.root_module.linkFramework("Accelerate", .{});
@@ -110,6 +107,7 @@ pub fn build(b: *std.Build) void {
     libmlx.root_module.link_libcpp = true;
     b.installArtifact(libmlx);
 
+    // MARK: METAL KERNELS
     if (metal) {
         const link = b.addSystemCommand(&.{ "xcrun", "-sdk", "macosx", "metal" });
         for (kernels) |k| link.addFileArg(air(b, mlx, k));
@@ -118,10 +116,11 @@ pub fn build(b: *std.Build) void {
         link.addArg("-o");
         const metallib = link.addOutputFileArg("mlx.metallib");
         const install = b.addInstallBinFile(metallib, "mlx.metallib");
+        b.addNamedLazyPath("metallib", metallib);
         b.getInstallStep().dependOn(&install.step);
-        tests.dependOn(&install.step);
     }
 
+    // MARK: LIBMLXC
     const libmlxc = b.addLibrary(.{
         .name = "mlxc",
         .linkage = .static,
@@ -137,6 +136,7 @@ pub fn build(b: *std.Build) void {
     libmlxc.root_module.linkLibrary(libmlx);
     b.installArtifact(libmlxc);
 
+    // MARK: MLX FFI MODULE
     const ffi = blk: {
         const tc = b.addTranslateC(.{
             .target = target,
@@ -144,21 +144,27 @@ pub fn build(b: *std.Build) void {
             .root_source_file = mlxc.path("mlx/c/mlx.h"),
         });
         tc.addIncludePath(mlxc.path(""));
-        break :blk tc.createModule();
+        const mod = tc.addModule("mlx");
+        mod.linkLibrary(libmlxc);
+        mod.link_libcpp = true;
+        break :blk mod;
     };
 
-    tests.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = blk: {
-        const mod = b.createModule(.{
-            .target = target,
-            .optimize = optimize,
-            .root_source_file = b.path("test.zig"),
-            .imports = &.{.{ .name = "mlx", .module = ffi }},
-            .link_libcpp = true,
-        });
-        mod.linkLibrary(libmlxc);
-        break :blk mod;
-    } })).step);
+    tests.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
+        .target = target,
+        .optimize = optimize,
+        .root_source_file = b.path("test.zig"),
+        .imports = &.{.{ .name = "mlx", .module = ffi }},
+    }) })).step);
 }
+
+// MARK: C++ SOURCES
+
+// The -U keeps __ARM_FEATURE_BF16 off in every C++ TU: clang predefines it on bf16-capable hosts
+// (M2+), flipping mlx's half_types.h to native __bf16, which lacks the cross-type conversions
+// array.h needs. libmlx and libmlxc must agree — the choice is ABI-visible in mangled names.
+// Only the preprocessor branch is pinned; codegen may still emit bf16 instructions.
+const cxxflags = &[_][]const u8{ "-std=c++20", "-U__ARM_FEATURE_BF16" };
 
 // Non-recursive crawl of dep's `sub` dir, adding each top-level `.cpp` to `mod` (minus `skip`).
 fn appendCpp(b: *std.Build, mod: *std.Build.Module, dep: *std.Build.Dependency, sub: []const u8, skip: []const []const u8) !void {
@@ -173,7 +179,7 @@ fn appendCpp(b: *std.Build, mod: *std.Build.Module, dep: *std.Build.Dependency, 
         for (skip) |s| if (std.mem.eql(u8, e.name, s)) continue :outer;
         mod.addCSourceFile(.{
             .file = dep.path(b.fmt("{s}/{s}", .{ sub, e.name })),
-            .flags = &.{"-std=c++20"},
+            .flags = cxxflags,
             .language = .cpp,
         });
     }

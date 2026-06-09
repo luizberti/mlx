@@ -1,3 +1,23 @@
+## Usage
+```zig
+const mal = b.dependency("mal", .{
+    .target = target,
+    .optimize = optimize,
+    .metal = true,   // this is only supported on macOS.
+    .nax = true,     // whether to also precompile the NAX kernels (needs Metal toolchain >= 4.0).
+    .jit = false,    // whether to JIT compile the Metal kernels, or compile them ahead of time.
+    .jaccl = false,  // enables the `jaccl` distributed backend (needs macOS >= 26.2)
+    .ring = false,   // enables the `ring` distributed backend
+});
+
+// needed only if the `.metal` backend is enabled
+b.getInstallStep().dependOn(&b.addInstallBinFile(mal.namedLazyPath("metallib"), "mlx.metallib").step);
+
+// MLX C FFI module
+const mlx = mal.module("mlx");
+```
+
+
 ## Future
 - Allow user to supply their own kernels;
 - Port kernels over to Zig and compile to ptx/spirv directly for portability;
