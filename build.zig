@@ -9,14 +9,21 @@ pub fn build(b: *std.Build) void {
             .cpu_model = .{ .explicit = &std.Target.aarch64.cpu.apple_m1 },
         },
     });
+    const metal = b.option(bool, "metal", "Metal GPU backend (CPU backend is always built)") orelse false;
+    const cuda = b.option(bool, "cuda", "CUDA GPU backend (reserved, not wired up yet)") orelse false;
     const jit = b.option(bool, "jit", "JIT Metal kernels at runtime (smaller metallib)") orelse false;
-    const nax = b.option(bool, "nax", "Precompile NAX kernel variants (needs Metal toolchain >= 4.0)") orelse true;
+    const nax = b.option(bool, "nax", "Precompile NAX kernel variants (needs Metal toolchain >= 4.0)") orelse false;
+    const ring = b.option(bool, "ring", "Distributed backend over TCP sockets") orelse false;
+    const jaccl = b.option(bool, "jaccl", "Distributed backend over Thunderbolt RDMA (needs macOS >= 26.2)") orelse false;
+    if (metal and target.result.os.tag != .macos) @panic("-Dmetal needs a macOS target");
+    if (cuda) @panic("-Dcuda is not wired up yet");
+    if (ring and target.result.os.tag == .windows) @panic("-Dring needs a POSIX target");
+    if (jaccl and target.result.os.tag != .macos) @panic("-Djaccl needs a macOS target");
 
     const tests = b.step("test", "Run test suite");
 
     const mlx = b.dependency("mlx", .{});
     const mlxc = b.dependency("mlxc", .{});
-    const metal = b.dependency("metal-cpp", .{});
     const fmt = b.dependency("fmt", .{});
 
     const command = mlx.path("mlx/backend/cpu/make_compiled_preamble.sh");
@@ -42,18 +49,37 @@ pub fn build(b: *std.Build) void {
     libmlx.root_module.addCMacro("ACCELERATE_NEW_LAPACK", "");
     libmlx.root_module.addCMacro("FMT_HEADER_ONLY", "");
     libmlx.root_module.addCMacro("MLX_VERSION", "\"0.31.2\"");
-    libmlx.root_module.addCMacro("METAL_PATH", b.fmt("\"{s}\"", .{b.getInstallPath(.bin, "mlx.metallib")}));
-    // In JIT mode NAX is always built and gated at runtime by is_nax_available() instead.
-    if (!jit and !nax) libmlx.root_module.addCMacro("MLX_METAL_NO_NAX", "");
+    if (metal) libmlx.root_module.addCMacro("METAL_PATH", b.fmt("\"{s}\"", .{b.getInstallPath(.bin, "mlx.metallib")}));
+
+    // NOTE: In JIT mode NAX is always built and gated at runtime by `is_nax_available()`
+    if (metal and !jit and !nax) libmlx.root_module.addCMacro("MLX_METAL_NO_NAX", "");
+
     libmlx.root_module.addIncludePath(mlx.path(""));
     libmlx.root_module.addIncludePath(fmt.path("include"));
-    libmlx.root_module.addIncludePath(metal.path(""));
+    if (metal) if (b.lazyDependency("metal-cpp", .{})) |metalcpp| {
+        libmlx.root_module.addIncludePath(metalcpp.path(""));
+    };
+
+    if (jaccl) libmlx.root_module.addIncludePath(mlx.path("mlx/distributed/jaccl/lib"));
+    if (ring or jaccl) if (b.lazyDependency("json", .{})) |json| {
+        libmlx.root_module.addIncludePath(json.path("single_include/nlohmann"));
+    };
+
     appendCpp(b, libmlx.root_module, mlx, "mlx", &.{}) catch @panic("append");
     appendCpp(b, libmlx.root_module, mlx, "mlx/backend/common", &.{}) catch @panic("append");
     appendCpp(b, libmlx.root_module, mlx, "mlx/backend/cpu", &.{}) catch @panic("append");
-    appendCpp(b, libmlx.root_module, mlx, "mlx/backend/gpu", &.{}) catch @panic("append");
-    appendCpp(b, libmlx.root_module, mlx, "mlx/backend/metal", &.{ "no_metal.cpp", if (jit) "nojit_kernels.cpp" else "jit_kernels.cpp" }) catch @panic("append");
+    appendCpp(b, libmlx.root_module, mlx, if (metal) "mlx/backend/gpu" else "mlx/backend/no_gpu", &.{}) catch @panic("append");
+    if (metal) appendCpp(b, libmlx.root_module, mlx, "mlx/backend/metal", &.{ "no_metal.cpp", if (jit) "nojit_kernels.cpp" else "jit_kernels.cpp" }) catch @panic("append");
+    if (!metal) libmlx.root_module.addCSourceFile(.{
+        .file = mlx.path("mlx/backend/metal/no_metal.cpp"),
+        .flags = &.{"-std=c++20"},
+        .language = .cpp,
+    });
     appendCpp(b, libmlx.root_module, mlx, "mlx/distributed", &.{}) catch @panic("append");
+    appendCpp(b, libmlx.root_module, mlx, "mlx/distributed/ring", &.{if (ring) "no_ring.cpp" else "ring.cpp"}) catch @panic("append");
+    appendCpp(b, libmlx.root_module, mlx, "mlx/distributed/jaccl", &.{if (jaccl) "no_jaccl.cpp" else "jaccl.cpp"}) catch @panic("append");
+    // jaccl proper: vendored in-tree by mlx, dlopens librdma.dylib at runtime (no link-time dep).
+    if (jaccl) appendCpp(b, libmlx.root_module, mlx, "mlx/distributed/jaccl/lib/jaccl", &.{}) catch @panic("append");
     libmlx.root_module.addCSourceFiles(.{
         .root = mlx.path(""),
         .files = &mlx_sources,
@@ -65,32 +91,36 @@ pub fn build(b: *std.Build) void {
         .flags = &.{"-std=c++20"},
         .language = .cpp,
     });
-    for (preambles) |name| libmlx.root_module.addCSourceFile(.{
+    if (metal) for (preambles) |name| libmlx.root_module.addCSourceFile(.{
         .file = embed(b, mlx, name),
         .flags = &.{"-std=c++20"},
         .language = .cpp,
     });
-    if (jit) for (jit_preambles) |name| libmlx.root_module.addCSourceFile(.{
+    if (metal and jit) for (jit_preambles) |name| libmlx.root_module.addCSourceFile(.{
         .file = embed(b, mlx, name),
         .flags = &.{"-std=c++20"},
         .language = .cpp,
     });
     libmlx.root_module.linkFramework("Accelerate", .{});
-    libmlx.root_module.linkFramework("Metal", .{});
-    libmlx.root_module.linkFramework("Foundation", .{});
-    libmlx.root_module.linkFramework("QuartzCore", .{});
+    if (metal) {
+        libmlx.root_module.linkFramework("Metal", .{});
+        libmlx.root_module.linkFramework("Foundation", .{});
+        libmlx.root_module.linkFramework("QuartzCore", .{});
+    }
     libmlx.root_module.link_libcpp = true;
     b.installArtifact(libmlx);
 
-    const link = b.addSystemCommand(&.{ "xcrun", "-sdk", "macosx", "metal" });
-    for (kernels) |k| link.addFileArg(air(b, mlx, k));
-    if (!jit) for (nojit_kernels) |k| link.addFileArg(air(b, mlx, k));
-    if (!jit and nax) for (nax_kernels) |k| link.addFileArg(air(b, mlx, k));
-    link.addArg("-o");
-    const metallib = link.addOutputFileArg("mlx.metallib");
-    const install = b.addInstallBinFile(metallib, "mlx.metallib");
-    b.getInstallStep().dependOn(&install.step);
-    tests.dependOn(&install.step);
+    if (metal) {
+        const link = b.addSystemCommand(&.{ "xcrun", "-sdk", "macosx", "metal" });
+        for (kernels) |k| link.addFileArg(air(b, mlx, k));
+        if (!jit) for (nojit_kernels) |k| link.addFileArg(air(b, mlx, k));
+        if (!jit and nax) for (nax_kernels) |k| link.addFileArg(air(b, mlx, k));
+        link.addArg("-o");
+        const metallib = link.addOutputFileArg("mlx.metallib");
+        const install = b.addInstallBinFile(metallib, "mlx.metallib");
+        b.getInstallStep().dependOn(&install.step);
+        tests.dependOn(&install.step);
+    }
 
     const libmlxc = b.addLibrary(.{
         .name = "mlxc",
@@ -179,9 +209,7 @@ const mlx_sources = [_][]const u8{
     "mlx/backend/cuda/no_cuda.cpp",
 
     "mlx/distributed/mpi/no_mpi.cpp",
-    "mlx/distributed/ring/no_ring.cpp",
     "mlx/distributed/nccl/no_nccl.cpp",
-    "mlx/distributed/jaccl/no_jaccl.cpp",
 
     "mlx/io/load.cpp",
     "mlx/io/no_gguf.cpp",

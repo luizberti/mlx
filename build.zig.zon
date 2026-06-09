@@ -15,10 +15,16 @@
         .@"metal-cpp" = .{
             .url = "https://developer.apple.com/metal/cpp/files/metal-cpp_26.zip",
             .hash = "N-V-__8AAKorGQAhnadXWLnod9VtLpm5GxAh4yhSBLdm7Eag",
+            .lazy = true,
         },
         .fmt = .{
             .url = "git+https://github.com/fmtlib/fmt.git?ref=12.1.0#407c905e45ad75fc29bf0f9bb7c5c2fd3475976f",
             .hash = "N-V-__8AAPE8LgDK9Qn7tjvCIu78z8Y8e6SW8WIUCAQIszuf",
+        },
+        .json = .{
+            .url = "https://github.com/nlohmann/json/releases/download/v3.11.3/json.tar.xz",
+            .hash = "N-V-__8AAOedHADB-3e14vvAh_b1waHxfGtsxx3daxAj9Ps3",
+            .lazy = true,
         },
     },
     .paths = .{""},

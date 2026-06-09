@@ -2,7 +2,9 @@ const std = @import("std");
 const mlx = @import("mlx");
 
 test "basic functionality works" {
-    const s = mlx.mlx_default_gpu_stream_new();
+    var gpu = false;
+    _ = mlx.mlx_metal_is_available(&gpu);
+    const s = if (gpu) mlx.mlx_default_gpu_stream_new() else mlx.mlx_default_cpu_stream_new();
     const a = mlx.mlx_array_new_float32(2.0);
     const b = mlx.mlx_array_new_float32(3.0);
     var res = mlx.mlx_array_new();
