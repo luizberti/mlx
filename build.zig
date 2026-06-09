@@ -9,6 +9,8 @@ pub fn build(b: *std.Build) void {
             .cpu_model = .{ .explicit = &std.Target.aarch64.cpu.apple_m1 },
         },
     });
+    const jit = b.option(bool, "jit", "JIT Metal kernels at runtime (smaller metallib)") orelse false;
+    const nax = b.option(bool, "nax", "Precompile NAX kernel variants (needs Metal toolchain >= 4.0)") orelse true;
 
     const tests = b.step("test", "Run test suite");
 
@@ -40,8 +42,9 @@ pub fn build(b: *std.Build) void {
     libmlx.root_module.addCMacro("ACCELERATE_NEW_LAPACK", "");
     libmlx.root_module.addCMacro("FMT_HEADER_ONLY", "");
     libmlx.root_module.addCMacro("MLX_VERSION", "\"0.31.2\"");
-    libmlx.root_module.addCMacro("MLX_METAL_NO_NAX", "");
     libmlx.root_module.addCMacro("METAL_PATH", b.fmt("\"{s}\"", .{b.getInstallPath(.bin, "mlx.metallib")}));
+    // In JIT mode NAX is always built and gated at runtime by is_nax_available() instead.
+    if (!jit and !nax) libmlx.root_module.addCMacro("MLX_METAL_NO_NAX", "");
     libmlx.root_module.addIncludePath(mlx.path(""));
     libmlx.root_module.addIncludePath(fmt.path("include"));
     libmlx.root_module.addIncludePath(metal.path(""));
@@ -49,7 +52,7 @@ pub fn build(b: *std.Build) void {
     appendCpp(b, libmlx.root_module, mlx, "mlx/backend/common", &.{}) catch @panic("append");
     appendCpp(b, libmlx.root_module, mlx, "mlx/backend/cpu", &.{}) catch @panic("append");
     appendCpp(b, libmlx.root_module, mlx, "mlx/backend/gpu", &.{}) catch @panic("append");
-    appendCpp(b, libmlx.root_module, mlx, "mlx/backend/metal", &.{ "no_metal.cpp", "jit_kernels.cpp" }) catch @panic("append");
+    appendCpp(b, libmlx.root_module, mlx, "mlx/backend/metal", &.{ "no_metal.cpp", if (jit) "nojit_kernels.cpp" else "jit_kernels.cpp" }) catch @panic("append");
     appendCpp(b, libmlx.root_module, mlx, "mlx/distributed", &.{}) catch @panic("append");
     libmlx.root_module.addCSourceFiles(.{
         .root = mlx.path(""),
@@ -63,7 +66,12 @@ pub fn build(b: *std.Build) void {
         .language = .cpp,
     });
     for (preambles) |name| libmlx.root_module.addCSourceFile(.{
-        .file = jit(b, mlx, name),
+        .file = embed(b, mlx, name),
+        .flags = &.{"-std=c++20"},
+        .language = .cpp,
+    });
+    if (jit) for (jit_preambles) |name| libmlx.root_module.addCSourceFile(.{
+        .file = embed(b, mlx, name),
         .flags = &.{"-std=c++20"},
         .language = .cpp,
     });
@@ -76,9 +84,13 @@ pub fn build(b: *std.Build) void {
 
     const link = b.addSystemCommand(&.{ "xcrun", "-sdk", "macosx", "metal" });
     for (kernels) |k| link.addFileArg(air(b, mlx, k));
+    if (!jit) for (nojit_kernels) |k| link.addFileArg(air(b, mlx, k));
+    if (!jit and nax) for (nax_kernels) |k| link.addFileArg(air(b, mlx, k));
     link.addArg("-o");
     const metallib = link.addOutputFileArg("mlx.metallib");
-    b.getInstallStep().dependOn(&b.addInstallBinFile(metallib, "mlx.metallib").step);
+    const install = b.addInstallBinFile(metallib, "mlx.metallib");
+    b.getInstallStep().dependOn(&install.step);
+    tests.dependOn(&install.step);
 
     const libmlxc = b.addLibrary(.{
         .name = "mlxc",
@@ -138,7 +150,7 @@ fn appendCpp(b: *std.Build, mod: *std.Build.Module, dep: *std.Build.Dependency, 
 }
 
 // Preprocess a metal kernel header into a C++ preamble string (mlx::core::metal::<name>()).
-fn jit(b: *std.Build, dep: *std.Build.Dependency, name: []const u8) std.Build.LazyPath {
+fn embed(b: *std.Build, dep: *std.Build.Dependency, name: []const u8) std.Build.LazyPath {
     const run = b.addSystemCommand(&.{"bash"});
     run.addFileArg(dep.path("mlx/backend/metal/make_compiled_preamble.sh"));
     const out = run.addOutputDirectoryArg("jit");
@@ -184,13 +196,39 @@ const preambles = [_][]const u8{
     "indexing/gather_front", "indexing/gather_axis",    "indexing/scatter_axis",
 };
 
-// No-JIT metallib kernels (fence needs metal>=320; NAX skipped via MLX_METAL_NO_NAX).
+// Extra preambles embedded in JIT mode: kernels are runtime-compiled from these instead of the metallib.
+const jit_preambles = [_][]const u8{
+    "arange",                                  "copy",                                     "unary",                                    "binary",                                      "binary_two",
+    "fft",                                     "logsumexp",                                "ternary",                                  "softmax",                                     "scan",
+    "sort",                                    "reduce",                                   "quantized_utils",                          "quantized",                                   "fp_quantized",
+    "gemv_masked",                             "quantized_nax",                            "fp_quantized_nax",                         "steel/gemm/gemm",                             "steel/gemm/gemm_nax",
+    "steel/gemm/kernels/steel_gemm_fused",     "steel/gemm/kernels/steel_gemm_masked",     "steel/gemm/kernels/steel_gemm_gather",     "steel/gemm/kernels/steel_gemm_splitk",        "steel/gemm/kernels/steel_gemm_segmented",
+    "steel/gemm/kernels/steel_gemm_fused_nax", "steel/gemm/kernels/steel_gemm_gather_nax", "steel/gemm/kernels/steel_gemm_splitk_nax", "steel/gemm/kernels/steel_gemm_segmented_nax", "steel/conv/conv",
+    "steel/conv/kernels/steel_conv",           "steel/conv/kernels/steel_conv_3d",         "steel/conv/kernels/steel_conv_general",    "steel/attn/kernels/steel_attention",          "steel/attn/kernels/steel_attention_nax",
+};
+
+// Metallib kernels precompiled in every mode (fence needs metal>=320).
 const kernels = [_][]const u8{
-    "arg_reduce",                           "conv",                                    "gemv",                                "layer_norm",                           "random",
-    "rms_norm",                             "rope",                                    "scaled_dot_product_attention",        "fence",                                "arange",
-    "binary",                               "binary_two",                              "copy",                                "fft",                                  "reduce",
-    "quantized",                            "fp_quantized",                            "scan",                                "softmax",                              "logsumexp",
-    "sort",                                 "ternary",                                 "unary",                               "gemv_masked",                          "steel/conv/kernels/steel_conv",
-    "steel/conv/kernels/steel_conv_3d",     "steel/conv/kernels/steel_conv_general",   "steel/gemm/kernels/steel_gemm_fused", "steel/gemm/kernels/steel_gemm_gather", "steel/gemm/kernels/steel_gemm_masked",
-    "steel/gemm/kernels/steel_gemm_splitk", "steel/gemm/kernels/steel_gemm_segmented", "steel/attn/kernels/steel_attention",
+    "arg_reduce", "conv", "gemv",                         "layer_norm", "random",
+    "rms_norm",   "rope", "scaled_dot_product_attention", "fence",
+};
+
+// Additional kernels precompiled when not in JIT mode.
+const nojit_kernels = [_][]const u8{
+    "arange",                               "binary",                               "binary_two",                              "copy",                                "fft",
+    "reduce",                               "quantized",                            "fp_quantized",                            "scan",                                "softmax",
+    "logsumexp",                            "sort",                                 "ternary",                                 "unary",                               "gemv_masked",
+    "steel/conv/kernels/steel_conv",        "steel/conv/kernels/steel_conv_3d",     "steel/conv/kernels/steel_conv_general",   "steel/gemm/kernels/steel_gemm_fused", "steel/gemm/kernels/steel_gemm_gather",
+    "steel/gemm/kernels/steel_gemm_masked", "steel/gemm/kernels/steel_gemm_splitk", "steel/gemm/kernels/steel_gemm_segmented", "steel/attn/kernels/steel_attention",
+};
+
+// NAX (neural accelerator) kernel variants, runtime-gated by is_nax_available().
+const nax_kernels = [_][]const u8{
+    "quantized_nax",
+    "fp_quantized_nax",
+    "steel/gemm/kernels/steel_gemm_fused_nax",
+    "steel/gemm/kernels/steel_gemm_gather_nax",
+    "steel/gemm/kernels/steel_gemm_splitk_nax",
+    "steel/gemm/kernels/steel_gemm_segmented_nax",
+    "steel/attn/kernels/steel_attention_nax",
 };
