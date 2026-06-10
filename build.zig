@@ -161,7 +161,7 @@ pub fn build(b: *std.Build) void {
     libmlxc.root_module.linkLibrary(libmlx);
     b.installArtifact(libmlxc);
 
-    // MARK: MLX FFI MODULE
+    // MARK: MLX MODULE
     const ffi = blk: {
         const tc = b.addTranslateC(.{
             .target = target,
@@ -169,17 +169,23 @@ pub fn build(b: *std.Build) void {
             .root_source_file = mlxc.path("mlx/c/mlx.h"),
         });
         tc.addIncludePath(mlxc.path(""));
-        const mod = tc.addModule("mlx");
+        const mod = tc.createModule();
         mod.linkLibrary(libmlxc);
         mod.link_libcpp = true;
         break :blk mod;
     };
+    const wrapper = b.addModule("mlx", .{
+        .target = target,
+        .optimize = optimize,
+        .root_source_file = b.path("core.zig"),
+        .imports = &.{.{ .name = "c", .module = ffi }},
+    });
 
     tests.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
         .target = target,
         .optimize = optimize,
         .root_source_file = b.path("test.zig"),
-        .imports = &.{.{ .name = "mlx", .module = ffi }},
+        .imports = &.{.{ .name = "mlx", .module = wrapper }},
     }) })).step);
 }
 
