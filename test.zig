@@ -15,8 +15,8 @@ test "basic functionality works" {
     defer res.deinit();
 
     try std.testing.expectEqual(5.0, try res.item(f32));
-    try std.testing.expectEqual(mlx.DType.float32, res.dtype());
-    try std.testing.expectEqual(0, res.ndim());
+    try std.testing.expectEqual(mlx.DType.float32, res.info.dtype());
+    try std.testing.expectEqual(0, res.info.ndim());
 }
 
 test "generated ops: nullable args, namespaces, multi-out" {
@@ -42,7 +42,7 @@ test "generated ops: nullable args, namespaces, multi-out" {
     defer one.deinit();
     const r = try mlx.random.uniform(zero, one, &.{ 2, 2 }, .float32, key, s);
     defer r.deinit();
-    try std.testing.expectEqualSlices(i32, &.{ 2, 2 }, r.shape());
+    try std.testing.expectEqualSlices(i32, &.{ 2, 2 }, r.info.shape());
 
     // linalg multi-out: QR of identity gives |Q[0][0]| = 1, Q[0][1] = 0
     const cpu: mlx.Stream = .cpu();
@@ -64,13 +64,13 @@ test "fromSlice, shape, data" {
 
     const a: mlx.Array = .fromSlice(f32, &.{ 1, 2, 3, 4, 5, 6 }, &.{ 2, 3 });
     defer a.deinit();
-    try std.testing.expectEqualSlices(i32, &.{ 2, 3 }, a.shape());
+    try std.testing.expectEqualSlices(i32, &.{ 2, 3 }, a.info.shape());
 
     const two: mlx.Array = .scalar(2.0);
     defer two.deinit();
-    var doubled: mlx.Array = .{ .h = mlx.cffi.mlx_array_new() };
+    var doubled: mlx.Array = .{ .info = .{ .handle = mlx.cffi.mlx_array_new() } };
     defer doubled.deinit();
-    try mlx.check(mlx.cffi.mlx_multiply(&doubled.h, a.h, two.h, s.h));
+    try mlx.check(mlx.cffi.mlx_multiply(&doubled.info.handle, a.info.handle, two.info.handle, s.h));
     try doubled.eval();
     try std.testing.expectEqualSlices(f32, &.{ 2, 4, 6, 8, 10, 12 }, try doubled.data(f32));
 }
@@ -165,6 +165,29 @@ test "valueAndGrad and compiled closure" {
     const co = try out.at(0);
     defer co.deinit();
     try std.testing.expectEqual(9.0, try co.item(f32));
+}
+
+test "Array methods: ops without a Scope" {
+    const s: mlx.Stream = .cpu();
+    defer s.deinit();
+
+    const x: mlx.Array = .fromSlice(f32, &.{ 1, 2, 3, 4 }, &.{4});
+    defer x.deinit();
+
+    const doubled = try x.add(x, s);
+    defer doubled.deinit();
+    const total = try doubled.sum(false, s);
+    defer total.deinit();
+    try std.testing.expectEqual(20.0, try total.item(f32));
+
+    const grid = try x.reshape(&.{ 2, 2 }, s);
+    defer grid.deinit();
+    try std.testing.expectEqualSlices(i32, &.{ 2, 2 }, grid.info.shape());
+
+    // vector-out op as a method
+    const halves = try grid.split(2, 0, s);
+    defer halves.deinit();
+    try std.testing.expectEqual(2, halves.len());
 }
 
 test "Scope tracks intermediates, escape survives deinit" {
@@ -276,8 +299,8 @@ test "lastError captures failure message" {
     const b: mlx.Array = .fromSlice(f32, &.{ 1, 2 }, &.{2});
     defer b.deinit();
 
-    var res: mlx.Array = .{ .h = mlx.cffi.mlx_array_new() };
+    var res: mlx.Array = .{ .info = .{ .handle = mlx.cffi.mlx_array_new() } };
     defer res.deinit();
-    try std.testing.expectError(error.Mlx, mlx.check(mlx.cffi.mlx_add(&res.h, a.h, b.h, s.h)));
+    try std.testing.expectError(error.Mlx, mlx.check(mlx.cffi.mlx_add(&res.info.handle, a.info.handle, b.info.handle, s.h)));
     try std.testing.expect(std.mem.indexOf(u8, mlx.lastError(), "broadcast") != null);
 }

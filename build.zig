@@ -185,14 +185,17 @@ pub fn build(b: *std.Build) void {
     const gen_run = b.addRunArtifact(gen);
     const gen_root = gen_run.addOutputFileArg("root.zig");
     const gen_scope = gen_run.addOutputFileArg("Scope.zig");
+    const gen_array = gen_run.addOutputFileArg("Array.zig");
     gen_run.addFileArg(b.path("src/root.zig"));
     gen_run.addFileArg(b.path("src/Scope.zig"));
+    gen_run.addFileArg(b.path("src/Array.zig"));
     for ([_][]const u8{ "ops.h", "linalg.h", "fft.h", "random.h" }) |h| {
         gen_run.addFileArg(mlxc.path(b.fmt("mlx/c/{s}", .{h})));
     }
     const wrapper_root = b.addWriteFiles();
     _ = wrapper_root.addCopyFile(gen_root, "root.zig");
     _ = wrapper_root.addCopyFile(gen_scope, "Scope.zig");
+    _ = wrapper_root.addCopyFile(gen_array, "Array.zig");
     _ = wrapper_root.addCopyFile(b.path("src/core.zig"), "core.zig");
     _ = wrapper_root.addCopyFile(b.path("src/transforms.zig"), "transforms.zig");
 

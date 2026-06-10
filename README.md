@@ -1,6 +1,6 @@
 ## Usage
 ```zig
-const mal = b.dependency("mal", .{
+const mlx = b.dependency("mlx", .{
     .target = target,
     .optimize = optimize,
     .metal = true,   // this is only supported on macOS.
@@ -11,10 +11,10 @@ const mal = b.dependency("mal", .{
 });
 
 // needed only if the `.metal` backend is enabled
-b.getInstallStep().dependOn(&b.addInstallBinFile(mal.namedLazyPath("metallib"), "mlx.metallib").step);
+b.getInstallStep().dependOn(&b.addInstallBinFile(mlx.namedLazyPath("metallib"), "mlx.metallib").step);
 
 // MLX Zig module (raw C FFI available under `mlx.cffi`)
-const mlx = mal.module("mlx");
+const mlx = mlx.module("mlx");
 ```
 
 

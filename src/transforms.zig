@@ -47,9 +47,9 @@ pub const Closure = extern struct {
     pub fn unary(comptime f: fn (Array) Error!Array) Closure {
         const W = struct {
             fn cb(res: [*c]c.mlx_array, x: c.mlx_array) callconv(.c) c_int {
-                const out = f(.{ .h = x }) catch return 1;
+                const out = f(.{ .info = .{ .handle = x } }) catch return 1;
                 defer out.deinit();
-                return c.mlx_array_set(res, out.h);
+                return c.mlx_array_set(res, out.info.handle);
             }
         };
         return .{ .h = c.mlx_closure_new_unary(W.cb) };

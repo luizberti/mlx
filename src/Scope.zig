@@ -1,3 +1,4 @@
+//! # Scope
 //! Ownership arena + op chain. Frees every tracked Array at deinit, so long op
 //! chains need no per-step defer — freeing intermediates is always safe because
 //! downstream graph nodes hold their own references to the arrays they consume.
@@ -51,18 +52,18 @@ pub fn enter(self: *@This(), operand: Array, stream: Stream) *@This() {
 pub fn collect(self: *@This()) ChainError!Array {
     const arr = try self.result;
     var h = cffi.mlx_array_new();
-    core.check(cffi.mlx_array_set(&h, arr.h)) catch |err| {
+    core.check(cffi.mlx_array_set(&h, arr.info.handle)) catch |err| {
         _ = cffi.mlx_array_free(h);
         return err;
     };
-    return .{ .h = h };
+    return .{ .info = .{ .handle = h } };
 }
 
 /// Takes an op result directly, so a manual chain step is a single try:
 /// `const t = try scope.track(mlx.add(a, b, s));`
 pub fn track(self: *@This(), array: Error!Array) (Error || stdz.mem.Allocator.Error)!Array {
     const arr = try array;
-    self.arena.append(self.alloc, arr.h) catch |err| {
+    self.arena.append(self.alloc, arr.info.handle) catch |err| {
         arr.deinit();
         return err;
     };
@@ -72,7 +73,7 @@ pub fn track(self: *@This(), array: Error!Array) (Error || stdz.mem.Allocator.Er
 /// Untrack `arr` and hand ownership back to the caller (it survives deinit).
 pub fn escape(self: *@This(), arr: Array) Array {
     for (self.arena.items, 0..) |h, i| {
-        if (h.ctx == arr.h.ctx) {
+        if (h.ctx == arr.info.handle.ctx) {
             _ = self.arena.swapRemove(i);
             break;
         }

@@ -1,6 +1,6 @@
 .{
-    .name = .mal,
-    .fingerprint = 0x87acf6f48579c43b,
+    .name = .mlx,
+    .fingerprint = 0x28d85cc4f0c56771,
     .minimum_zig_version = "0.16.0",
     .version = "0.0.1",
     .dependencies = .{
