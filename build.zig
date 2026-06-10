@@ -3,6 +3,7 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const darwin = target.result.os.tag == .macos;
 
     const metal = b.option(bool, "metal", "Metal GPU backend (CPU backend is always built)") orelse false;
     const cuda = b.option(bool, "cuda", "CUDA GPU backend (reserved, not wired up yet)") orelse false;
@@ -27,7 +28,7 @@ pub fn build(b: *std.Build) void {
     const preamble = codegen.addOutputFileArg("compiled_preamble.cpp");
     codegen.addArg("clang");
     codegen.addDirectoryArg(mlx.path(""));
-    codegen.addArgs(&.{ "TRUE", "arm64" });
+    codegen.addArgs(&.{ "TRUE", if (target.result.cpu.arch == .x86_64) "x86_64" else "arm64" });
 
     // MARK: LIBMLX
     const libmlx = b.addLibrary(.{
@@ -43,8 +44,10 @@ pub fn build(b: *std.Build) void {
     libmlx.root_module.addIncludePath(fmt.path("include"));
     libmlx.root_module.addCMacro("MLX_VERSION", "\"0.31.2\"");
     libmlx.root_module.addCMacro("MLX_STATIC", "");
-    libmlx.root_module.addCMacro("MLX_USE_ACCELERATE", "");
-    libmlx.root_module.addCMacro("ACCELERATE_NEW_LAPACK", "");
+    if (darwin) {
+        libmlx.root_module.addCMacro("MLX_USE_ACCELERATE", "");
+        libmlx.root_module.addCMacro("ACCELERATE_NEW_LAPACK", "");
+    }
     libmlx.root_module.addCMacro("FMT_HEADER_ONLY", "");
     if (metal) libmlx.root_module.addCMacro(
         "METAL_PATH",
@@ -56,6 +59,17 @@ pub fn build(b: *std.Build) void {
 
     if (metal) if (b.lazyDependency("metal-cpp", .{})) |metalcpp| {
         libmlx.root_module.addIncludePath(metalcpp.path(""));
+    };
+
+    if (!darwin) if (b.lazyDependency("lapack", .{})) |lapack| {
+        // cblas.h/lapack.h include mangling headers that upstream generates with
+        // configure_file; the .in templates have no substitutions, so a copy suffices.
+        const mangling = b.addWriteFiles();
+        _ = mangling.addCopyFile(lapack.path("CBLAS/include/cblas_mangling_with_flags.h.in"), "cblas_mangling.h");
+        _ = mangling.addCopyFile(lapack.path("LAPACKE/include/lapacke_mangling_with_flags.h.in"), "lapacke_mangling.h");
+        libmlx.root_module.addIncludePath(mangling.getDirectory());
+        libmlx.root_module.addIncludePath(lapack.path("CBLAS/include"));
+        libmlx.root_module.addIncludePath(lapack.path("LAPACKE/include"));
     };
 
     if (jaccl) libmlx.root_module.addIncludePath(mlx.path("mlx/distributed/jaccl/lib"));
@@ -83,6 +97,17 @@ pub fn build(b: *std.Build) void {
         .flags = cxxflags,
         .language = .cpp,
     });
+    libmlx.root_module.addCSourceFiles(.{
+        .root = mlx.path(""),
+        .files = if (darwin) &[_][]const u8{
+            "mlx/backend/cpu/gemms/bnns.cpp",
+        } else &[_][]const u8{
+            "mlx/backend/cpu/gemms/simd_fp16.cpp",
+            "mlx/backend/cpu/gemms/simd_bf16.cpp",
+        },
+        .flags = cxxflags,
+        .language = .cpp,
+    });
     libmlx.root_module.addCSourceFile(.{
         .file = preamble,
         .flags = cxxflags,
@@ -98,7 +123,7 @@ pub fn build(b: *std.Build) void {
         .flags = cxxflags,
         .language = .cpp,
     });
-    libmlx.root_module.linkFramework("Accelerate", .{});
+    if (darwin) libmlx.root_module.linkFramework("Accelerate", .{});
     if (metal) {
         libmlx.root_module.linkFramework("Metal", .{});
         libmlx.root_module.linkFramework("Foundation", .{});
@@ -209,7 +234,6 @@ fn air(b: *std.Build, dep: *std.Build.Dependency, kernel: []const u8) std.Build.
 }
 
 const mlx_sources = [_][]const u8{
-    "mlx/backend/cpu/gemms/bnns.cpp",
     "mlx/backend/cpu/gemms/cblas.cpp",
 
     "mlx/backend/cuda/no_cuda.cpp",
