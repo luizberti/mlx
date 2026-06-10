@@ -7,8 +7,8 @@ pub const c = @import("c");
 
 pub const Error = error{Mlx};
 
-threadlocal var error_buf: [512]u8 = undefined;
 threadlocal var error_len: usize = 0;
+threadlocal var error_buf: [512]u8 = undefined;
 
 fn onError(msg: [*c]const u8, data: ?*anyopaque) callconv(.c) void {
     _ = data;
@@ -40,7 +40,7 @@ pub fn metalAvailable() bool {
 }
 
 pub const Dtype = enum(c_uint) {
-    @"bool" = 0,
+    bool = 0,
     uint8,
     uint16,
     uint32,
@@ -57,7 +57,7 @@ pub const Dtype = enum(c_uint) {
 
     pub fn of(comptime T: type) Dtype {
         return switch (T) {
-            bool => .@"bool",
+            bool => .bool,
             u8 => .uint8,
             u16 => .uint16,
             u32 => .uint32,

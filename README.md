@@ -13,7 +13,7 @@ const mal = b.dependency("mal", .{
 // needed only if the `.metal` backend is enabled
 b.getInstallStep().dependOn(&b.addInstallBinFile(mal.namedLazyPath("metallib"), "mlx.metallib").step);
 
-// MLX C FFI module
+// MLX Zig module (raw C FFI available under `mlx.c`)
 const mlx = mal.module("mlx");
 ```
 

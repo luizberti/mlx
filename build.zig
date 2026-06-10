@@ -174,10 +174,28 @@ pub fn build(b: *std.Build) void {
         mod.link_libcpp = true;
         break :blk mod;
     };
+    const gen = b.addExecutable(.{
+        .name = "gen",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("gen.zig"),
+            .target = b.graph.host,
+            .optimize = .Debug,
+        }),
+    });
+    const gen_run = b.addRunArtifact(gen);
+    const gen_out = gen_run.addOutputFileArg("mlx.zig");
+    for ([_][]const u8{ "ops.h", "linalg.h", "fft.h", "random.h" }) |h| {
+        gen_run.addFileArg(mlxc.path(b.fmt("mlx/c/{s}", .{h})));
+    }
+    const wrapper_root = b.addWriteFiles();
+    _ = wrapper_root.addCopyFile(gen_out, "mlx.zig");
+    _ = wrapper_root.addCopyFile(b.path("core.zig"), "core.zig");
+    _ = wrapper_root.addCopyFile(b.path("transforms.zig"), "transforms.zig");
+
     const wrapper = b.addModule("mlx", .{
         .target = target,
         .optimize = optimize,
-        .root_source_file = b.path("core.zig"),
+        .root_source_file = wrapper_root.getDirectory().path(b, "mlx.zig"),
         .imports = &.{.{ .name = "c", .module = ffi }},
     });
 
