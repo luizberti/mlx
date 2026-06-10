@@ -1,6 +1,8 @@
 //! Build-time generator: parses mlx-c op headers and emits the mlx module root
-//! (re-exporting core.zig) with one ziggy wrapper per C function.
-//! Usage: gen <out.zig> <ops.h> [more headers...]
+//! (the src/root.zig template verbatim, then one ziggy wrapper per C function)
+//! plus Scope.zig (the src/Scope.zig template verbatim, then one chain method
+//! per Array-first single-out op).
+//! Usage: gen <root.zig> <Scope.zig> <root-template> <scope-template> <ops.h> [more headers...]
 //! Headers named ops.h emit at top level; any other <name>.h emits `pub const name = struct {...}`.
 const std = @import("std");
 
@@ -45,18 +47,18 @@ const Namespace = struct {
 };
 
 const keywords = [_][]const u8{
-    "var",   "fn",    "test",   "error", "type",   "and",    "or",     "if",
-    "else",  "while", "for",    "break", "return", "switch", "defer",  "struct",
-    "enum",  "union", "opaque", "pub",   "const",  "export", "extern", "inline",
+    "var",  "fn",    "test",   "error", "type",   "and",    "or",     "if",
+    "else", "while", "for",    "break", "return", "switch", "defer",  "struct",
+    "enum", "union", "opaque", "pub",   "const",  "export", "extern", "inline",
 };
 
 // File-scope decls of the generated module; params and fn names must not shadow them.
 const reserved = [_][]const u8{
-    "core",      "c",       "std",          "Error",      "Dtype",          "Array",
-    "Arrays",    "Stream",  "Norm",         "init",       "check",          "lastError",
-    "metalAvailable", "res0", "res1",       "transforms", "Closure",        "ValueAndGrad",
-    "eval",      "asyncEval", "vjp",        "jvp",        "valueAndGrad",   "checkpoint",
-    "compile",
+    "core",         "cffi",           "std",       "Error", "DType",      "Array",
+    "Arrays",       "Stream",         "Scope",     "Norm",  "init",       "check",
+    "lastError",    "metalAvailable", "res0",      "res1",  "transforms", "Closure",
+    "ValueAndGrad", "eval",           "asyncEval", "vjp",   "jvp",        "valueAndGrad",
+    "checkpoint",   "compile",
 };
 
 fn contains(set: []const []const u8, s: []const u8) bool {
@@ -76,6 +78,25 @@ fn camelize(arena: std.mem.Allocator, s: []const u8) ![]const u8 {
         up = false;
     }
     return out.items;
+}
+
+// mlx-c param names that read poorly or collide pervasively in Zig.
+fn paramAlias(name: []const u8) []const u8 {
+    if (std.mem.eql(u8, name, "transpose")) return "transp"; // collides with the transpose op
+    if (std.mem.eql(u8, name, "type")) return "dtype"; // Zig keyword; the param is an mlx_dtype
+    if (std.mem.eql(u8, name, "logits_")) return "logits"; // upstream typo in categorical_num_samples
+    if (std.mem.eql(u8, name, "mean")) return "mu"; // collides with the top-level mean op
+    return name;
+}
+
+// Renamed wrapper fns: mlx_var would need @"var" keyword escaping; random.key
+// and random.seed shadowed the `key`/`seed` params used across the namespace
+// (reseed also says what it does: mutate the global PRNG state).
+fn fnAlias(zname: []const u8) []const u8 {
+    if (std.mem.eql(u8, zname, "var")) return "variance";
+    if (std.mem.eql(u8, zname, "key")) return "prng";
+    if (std.mem.eql(u8, zname, "seed")) return "reseed";
+    return zname;
 }
 
 const nullable_marker = "\x01N\x01";
@@ -219,7 +240,7 @@ fn parseHeader(arena: std.mem.Allocator, ns: *Namespace, text: []const u8) !void
                 },
                 else => {},
             }
-            try params.append(arena, .{ .kind = kind, .name = raw.name });
+            try params.append(arena, .{ .kind = kind, .name = paramAlias(raw.name) });
         }
         if (!ok) {
             try ns.skipped.append(arena, cname);
@@ -231,9 +252,10 @@ fn parseHeader(arena: std.mem.Allocator, ns: *Namespace, text: []const u8) !void
             const pfx = try std.fmt.allocPrint(arena, "{s}_", .{ns.name});
             stem = std.mem.cutPrefix(u8, stem, pfx) orelse stem;
         }
+        const zname = try camelize(arena, stem);
         try ns.decls.append(arena, .{
             .cname = cname,
-            .zname = try camelize(arena, stem),
+            .zname = fnAlias(zname),
             .outs = outs,
             .out_kind = out_kind,
             .params = params.items,
@@ -257,11 +279,11 @@ fn zigType(kind: Kind) []const u8 {
         .scalar_f32 => "f32",
         .scalar_f64 => "f64",
         .scalar_u64 => "u64",
-        .dtype => "Dtype",
+        .dtype => "DType",
         .fft_norm => "Norm",
         .opt_i32 => "?i32",
         .opt_f32 => "?f32",
-        .opt_dtype => "?Dtype",
+        .opt_dtype => "?DType",
         .out_array, .out_arrays => unreachable,
     };
 }
@@ -320,9 +342,9 @@ fn emitNamespace(arena: std.mem.Allocator, w: *std.Io.Writer, ns: *const Namespa
         try w.print(") Error!{s} {{\n", .{ret});
 
         const ctor = if (d.out_kind == .out_array) "mlx_array_new" else "mlx_vector_array_new";
-        for (0..d.outs) |o| try w.print("    var res{d} = c.{s}();\n", .{ o, ctor });
+        for (0..d.outs) |o| try w.print("    var res{d} = cffi.{s}();\n", .{ o, ctor });
 
-        try w.print("    try check(c.{s}(", .{d.cname});
+        try w.print("    try check(cffi.{s}(", .{d.cname});
         var o: usize = 0;
         for (d.params, 0..) |p, idx| {
             if (idx > 0) try w.writeAll(", ");
@@ -352,48 +374,62 @@ fn emitNamespace(arena: std.mem.Allocator, w: *std.Io.Writer, ns: *const Namespa
     }
 }
 
+// Chain methods on Scope: each eligible op threads self.result through and
+// no-ops once it holds an error. Eligible = single mlx_array out, first input
+// is a required mlx_array (becomes self.result), last param is the stream
+// (becomes self.stream). Everything else keeps the free-function signature.
+fn emitScopeMethods(arena: std.mem.Allocator, w: *std.Io.Writer, ns: *const Namespace) !void {
+    // Decls of the Scope.zig template; method and param names must not collide.
+    const scope_reserved = [_][]const u8{
+        "stdz",   "core",       "cffi",  "Error", "Array",  "Arrays", "DType",
+        "Stream", "ChainError", "root",  "init",  "deinit", "enter",  "collect",
+        "track",  "escape",     "alloc", "arena", "stream", "result", "unwrapped",
+        "self",
+    };
+    var taken: std.ArrayList([]const u8) = .empty;
+    try taken.appendSlice(arena, &scope_reserved);
+    for (ns.decls.items) |d| try taken.append(arena, d.zname);
+
+    for (ns.decls.items) |d| {
+        if (d.outs != 1 or d.out_kind != .out_array) continue;
+        if (d.params.len < 3) continue; // out + leading array + stream
+        if (d.params[1].kind != .in_array) continue;
+        if (d.params[d.params.len - 1].kind != .stream) continue;
+        if (contains(&scope_reserved, d.zname)) {
+            try w.print("// Not a chain method (collides with a Scope decl) — use the free function: {s}\n", .{d.cname});
+            continue;
+        }
+        const fname = if (contains(&keywords, d.zname))
+            try std.fmt.allocPrint(arena, "@\"{s}\"", .{d.zname})
+        else
+            d.zname;
+
+        try w.print("pub fn {s}(self: *@This()", .{fname});
+        const mids = d.params[2 .. d.params.len - 1];
+        var names = try arena.alloc([]const u8, mids.len);
+        for (mids, 0..) |p, idx| {
+            names[idx] = if (contains(taken.items, p.name) or contains(&keywords, p.name))
+                try std.fmt.allocPrint(arena, "{s}_", .{p.name})
+            else
+                p.name;
+            try w.print(", {s}: {s}", .{ names[idx], zigType(p.kind) });
+        }
+        try w.writeAll(") *@This() {\n");
+        try w.writeAll("    const unwrapped = self.result catch return self;\n");
+        try w.print("    self.result = self.track(root.{s}(unwrapped", .{fname});
+        for (names) |n| try w.print(", {s}", .{n});
+        try w.writeAll(", self.stream));\n    return self;\n}\n");
+    }
+}
+
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const arena = init.arena.allocator();
     const args = try init.minimal.args.toSlice(arena);
-    if (args.len < 3) return error.Usage; // gen <out.zig> <header...>
-
-    var out_file = try std.Io.Dir.cwd().createFile(io, args[1], .{});
-    defer out_file.close(io);
-    var wbuf: [64 * 1024]u8 = undefined;
-    var fw = out_file.writer(io, &wbuf);
-    const w = &fw.interface;
-
-    try w.writeAll(
-        \\// Generated by gen.zig from mlx-c headers. Do not edit.
-        \\const core = @import("core.zig");
-        \\pub const c = core.c;
-        \\pub const Error = core.Error;
-        \\pub const Dtype = core.Dtype;
-        \\pub const Array = core.Array;
-        \\pub const Arrays = core.Arrays;
-        \\pub const Stream = core.Stream;
-        \\pub const init = core.init;
-        \\pub const lastError = core.lastError;
-        \\pub const check = core.check;
-        \\pub const metalAvailable = core.metalAvailable;
-        \\pub const Norm = enum(c_uint) { backward = 0, ortho = 1, forward = 2 };
-        \\const transforms = @import("transforms.zig");
-        \\pub const Closure = transforms.Closure;
-        \\pub const ValueAndGrad = transforms.ValueAndGrad;
-        \\pub const eval = transforms.eval;
-        \\pub const asyncEval = transforms.asyncEval;
-        \\pub const vjp = transforms.vjp;
-        \\pub const jvp = transforms.jvp;
-        \\pub const valueAndGrad = transforms.valueAndGrad;
-        \\pub const checkpoint = transforms.checkpoint;
-        \\pub const compile = transforms.compile;
-        \\
-        \\
-    );
+    if (args.len < 6) return error.Usage; // gen <root.zig> <Scope.zig> <root-template> <scope-template> <header...>
 
     var namespaces: std.ArrayList(Namespace) = .empty;
-    for (args[2..]) |path| {
+    for (args[5..]) |path| {
         const base = std.fs.path.basename(path);
         const name = std.mem.cutSuffix(u8, base, ".h") orelse base;
         var ns: Namespace = .{ .name = name };
@@ -413,6 +449,20 @@ pub fn main(init: std.process.Init) !void {
         }
     }
 
+    var root_file = try std.Io.Dir.cwd().createFile(io, args[1], .{});
+    defer root_file.close(io);
+    var rbuf: [64 * 1024]u8 = undefined;
+    var rfw = root_file.writer(io, &rbuf);
+    const w = &rfw.interface;
+
+    try w.writeAll(try std.Io.Dir.cwd().readFileAlloc(io, args[3], arena, .limited(1 << 20)));
+    try w.writeAll(
+        \\
+        \\// Everything below is generated by gen.zig from the mlx-c headers. Do not edit.
+        \\pub const Norm = enum(c_uint) { backward = 0, ortho = 1, forward = 2 };
+        \\
+        \\
+    );
     for (namespaces.items) |*ns| {
         if (std.mem.eql(u8, ns.name, "ops")) {
             try emitNamespace(arena, w, ns, top.items);
@@ -423,4 +473,22 @@ pub fn main(init: std.process.Init) !void {
         }
     }
     try w.flush();
+
+    var scope_file = try std.Io.Dir.cwd().createFile(io, args[2], .{});
+    defer scope_file.close(io);
+    var sbuf: [64 * 1024]u8 = undefined;
+    var sfw = scope_file.writer(io, &sbuf);
+    const sw = &sfw.interface;
+
+    try sw.writeAll(try std.Io.Dir.cwd().readFileAlloc(io, args[4], arena, .limited(1 << 20)));
+    try sw.writeAll(
+        \\
+        \\// Everything below is generated by gen.zig from the mlx-c headers. Do not edit.
+        \\
+        \\
+    );
+    for (namespaces.items) |*ns| {
+        if (std.mem.eql(u8, ns.name, "ops")) try emitScopeMethods(arena, sw, ns);
+    }
+    try sw.flush();
 }

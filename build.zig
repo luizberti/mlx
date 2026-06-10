@@ -183,19 +183,23 @@ pub fn build(b: *std.Build) void {
         }),
     });
     const gen_run = b.addRunArtifact(gen);
-    const gen_out = gen_run.addOutputFileArg("mlx.zig");
+    const gen_root = gen_run.addOutputFileArg("root.zig");
+    const gen_scope = gen_run.addOutputFileArg("Scope.zig");
+    gen_run.addFileArg(b.path("src/root.zig"));
+    gen_run.addFileArg(b.path("src/Scope.zig"));
     for ([_][]const u8{ "ops.h", "linalg.h", "fft.h", "random.h" }) |h| {
         gen_run.addFileArg(mlxc.path(b.fmt("mlx/c/{s}", .{h})));
     }
     const wrapper_root = b.addWriteFiles();
-    _ = wrapper_root.addCopyFile(gen_out, "mlx.zig");
-    _ = wrapper_root.addCopyFile(b.path("core.zig"), "core.zig");
-    _ = wrapper_root.addCopyFile(b.path("transforms.zig"), "transforms.zig");
+    _ = wrapper_root.addCopyFile(gen_root, "root.zig");
+    _ = wrapper_root.addCopyFile(gen_scope, "Scope.zig");
+    _ = wrapper_root.addCopyFile(b.path("src/core.zig"), "core.zig");
+    _ = wrapper_root.addCopyFile(b.path("src/transforms.zig"), "transforms.zig");
 
     const wrapper = b.addModule("mlx", .{
         .target = target,
         .optimize = optimize,
-        .root_source_file = wrapper_root.getDirectory().path(b, "mlx.zig"),
+        .root_source_file = wrapper_root.getDirectory().path(b, "root.zig"),
         .imports = &.{.{ .name = "c", .module = ffi }},
     });
 

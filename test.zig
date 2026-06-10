@@ -15,7 +15,7 @@ test "basic functionality works" {
     defer res.deinit();
 
     try std.testing.expectEqual(5.0, try res.item(f32));
-    try std.testing.expectEqual(mlx.Dtype.float32, res.dtype());
+    try std.testing.expectEqual(mlx.DType.float32, res.dtype());
     try std.testing.expectEqual(0, res.ndim());
 }
 
@@ -34,7 +34,7 @@ test "generated ops: nullable args, namespaces, multi-out" {
     try std.testing.expectEqualSlices(f32, &.{ 0, 0.5, 9 }, try clipped.data(f32));
 
     // random namespace + dtype arg
-    const key = try mlx.random.key(42);
+    const key = try mlx.random.prng(42);
     defer key.deinit();
     const zero: mlx.Array = .scalar(0.0);
     defer zero.deinit();
@@ -68,9 +68,9 @@ test "fromSlice, shape, data" {
 
     const two: mlx.Array = .scalar(2.0);
     defer two.deinit();
-    var doubled: mlx.Array = .{ .h = mlx.c.mlx_array_new() };
+    var doubled: mlx.Array = .{ .h = mlx.cffi.mlx_array_new() };
     defer doubled.deinit();
-    try mlx.check(mlx.c.mlx_multiply(&doubled.h, a.h, two.h, s.h));
+    try mlx.check(mlx.cffi.mlx_multiply(&doubled.h, a.h, two.h, s.h));
     try doubled.eval();
     try std.testing.expectEqualSlices(f32, &.{ 2, 4, 6, 8, 10, 12 }, try doubled.data(f32));
 }
@@ -167,6 +167,105 @@ test "valueAndGrad and compiled closure" {
     try std.testing.expectEqual(9.0, try co.item(f32));
 }
 
+test "Scope tracks intermediates, escape survives deinit" {
+    const s: mlx.Stream = .cpu();
+    defer s.deinit();
+
+    const a: mlx.Array = .fromSlice(f32, &.{ 1, 2, 3, 4 }, &.{4});
+    defer a.deinit();
+
+    var scope: mlx.Scope = .init(std.testing.allocator);
+    const doubled = try scope.track(mlx.add(a, a, s)); // {2,4,6,8}
+    const squared = try scope.track(mlx.multiply(doubled, doubled, s)); // {4,16,36,64}
+    const total = try scope.track(mlx.sum(squared, false, s)); // 120
+    const out = scope.escape(total);
+    defer out.deinit();
+    scope.deinit();
+
+    try std.testing.expectEqual(120.0, try out.item(f32));
+}
+
+test "Scope chain: sticky result, take survives scope deinit" {
+    const s: mlx.Stream = .cpu();
+    defer s.deinit();
+
+    // no defer: enter() takes ownership, the scope frees x
+    const x: mlx.Array = .fromSlice(f32, &.{ 1, 2, 3, 4 }, &.{4});
+
+    var scope: mlx.Scope = .init(std.testing.allocator);
+    const out = try scope.enter(x, s).add(x).square().sum(false).collect();
+    defer out.deinit();
+    scope.deinit(); // collect() bumped the refcount: out must outlive the scope
+
+    try std.testing.expectEqual(120.0, try out.item(f32)); // sum((2x)^2) = 4+16+36+64
+}
+
+test "Scope.track frees the array when arena append fails" {
+    const s: mlx.Stream = .cpu();
+    defer s.deinit();
+
+    const a: mlx.Array = .fromSlice(f32, &.{ 1, 2, 3, 4 }, &.{4});
+    defer a.deinit();
+    const y = try mlx.add(a, a, s); // no defer: ownership goes to track, even on failure
+    try y.eval(); // materialize y's buffer so a leak would show in active memory
+
+    var before: usize = 0;
+    try mlx.check(mlx.cffi.mlx_get_active_memory(&before));
+
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    var scope: mlx.Scope = .init(failing.allocator());
+    defer scope.deinit();
+    try std.testing.expectError(error.OutOfMemory, scope.track(y));
+
+    var after: usize = 0;
+    try mlx.check(mlx.cffi.mlx_get_active_memory(&after));
+    try std.testing.expect(after < before); // y's buffer was released, not leaked
+}
+
+test "Scope chain: enter resets the scope for reuse" {
+    mlx.init();
+    const s: mlx.Stream = .cpu();
+    defer s.deinit();
+
+    const x: mlx.Array = .fromSlice(f32, &.{ 1, 2, 3, 4 }, &.{4});
+    defer x.deinit();
+    const bad: mlx.Array = .fromSlice(f32, &.{ 1, 2 }, &.{2});
+    defer bad.deinit();
+
+    var scope: mlx.Scope = .init(std.testing.allocator);
+    defer scope.deinit();
+
+    // clone: each enter consumes a reference, the caller's x stays valid
+    const first = try scope.enter(try x.clone(), s).add(x).sum(false).collect();
+    defer first.deinit();
+    try std.testing.expectEqual(20.0, try first.item(f32));
+
+    // poison the second chain, then re-enter: result and arena must reset
+    try std.testing.expectError(error.Mlx, scope.enter(try x.clone(), s).add(bad).collect());
+    const third = try scope.enter(try x.clone(), s).square().sum(false).collect();
+    defer third.deinit();
+    try std.testing.expectEqual(30.0, try third.item(f32)); // 1+4+9+16
+
+    // first chain's collected result is an independent reference: still valid
+    try std.testing.expectEqual(20.0, try first.item(f32));
+}
+
+test "Scope chain: failure poisons, take surfaces it" {
+    mlx.init();
+    const s: mlx.Stream = .cpu();
+    defer s.deinit();
+
+    const x: mlx.Array = .fromSlice(f32, &.{ 1, 2, 3 }, &.{3}); // owned by the scope
+    const bad: mlx.Array = .fromSlice(f32, &.{ 1, 2 }, &.{2});
+    defer bad.deinit();
+
+    var scope: mlx.Scope = .init(std.testing.allocator);
+    defer scope.deinit();
+    // add fails (broadcast), square no-ops on the poisoned result
+    try std.testing.expectError(error.Mlx, scope.enter(x, s).add(bad).square().collect());
+    try std.testing.expect(std.mem.indexOf(u8, mlx.lastError(), "broadcast") != null);
+}
+
 test "lastError captures failure message" {
     mlx.init();
     const s: mlx.Stream = .cpu();
@@ -177,8 +276,8 @@ test "lastError captures failure message" {
     const b: mlx.Array = .fromSlice(f32, &.{ 1, 2 }, &.{2});
     defer b.deinit();
 
-    var res: mlx.Array = .{ .h = mlx.c.mlx_array_new() };
+    var res: mlx.Array = .{ .h = mlx.cffi.mlx_array_new() };
     defer res.deinit();
-    try std.testing.expectError(error.Mlx, mlx.check(mlx.c.mlx_add(&res.h, a.h, b.h, s.h)));
+    try std.testing.expectError(error.Mlx, mlx.check(mlx.cffi.mlx_add(&res.h, a.h, b.h, s.h)));
     try std.testing.expect(std.mem.indexOf(u8, mlx.lastError(), "broadcast") != null);
 }

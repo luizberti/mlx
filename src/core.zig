@@ -39,7 +39,7 @@ pub fn metalAvailable() bool {
     return res;
 }
 
-pub const Dtype = enum(c_uint) {
+pub const DType = enum(c_uint) {
     bool = 0,
     uint8,
     uint16,
@@ -55,7 +55,7 @@ pub const Dtype = enum(c_uint) {
     bfloat16,
     complex64,
 
-    pub fn of(comptime T: type) Dtype {
+    pub fn of(comptime T: type) DType {
         return switch (T) {
             bool => .bool,
             u8 => .uint8,
@@ -73,7 +73,7 @@ pub const Dtype = enum(c_uint) {
         };
     }
 
-    pub fn size(self: Dtype) usize {
+    pub fn size(self: DType) usize {
         return c.mlx_dtype_size(@intFromEnum(self));
     }
 };
@@ -138,7 +138,7 @@ pub const Array = extern struct {
             @ptrCast(items.ptr),
             shape_.ptr,
             @intCast(shape_.len),
-            @intFromEnum(Dtype.of(T)),
+            @intFromEnum(DType.of(T)),
         ) };
     }
 
@@ -149,6 +149,18 @@ pub const Array = extern struct {
     /// Rebind this handle to src's value (mlx_array_set).
     pub fn assign(self: *Array, src: Array) Error!void {
         try check(c.mlx_array_set(&self.h, src.h));
+    }
+
+    /// New owned handle to the same underlying array — a refcount bump
+    /// (mlx_array_new + mlx_array_set; mlx-c has no explicit retain), NOT a
+    /// data copy. For a graph-level copy of the data, use the mlx.copy op.
+    pub fn clone(self: Array) Error!Array {
+        var h = c.mlx_array_new();
+        check(c.mlx_array_set(&h, self.h)) catch |err| {
+            _ = c.mlx_array_free(h);
+            return err;
+        };
+        return .{ .h = h };
     }
 
     pub fn ndim(self: Array) usize {
@@ -164,7 +176,7 @@ pub const Array = extern struct {
         return if (n == 0) &.{} else c.mlx_array_shape(self.h)[0..n];
     }
 
-    pub fn dtype(self: Array) Dtype {
+    pub fn dtype(self: Array) DType {
         return @enumFromInt(c.mlx_array_dtype(self.h));
     }
 
