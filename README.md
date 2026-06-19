@@ -1,3 +1,21 @@
+# MLX for Zig
+These are ergonomic binding's to Apple's MLX machine-learning framework. The
+entire package as well as all dependencies are built with the Zig compiler,
+leveraging the Zig build system.
+
+One of the biggest benefits of this is that we don't need to link `libc` or
+`libcpp` at all, and don't need to link anything else for CPU-only builds. As
+for GPU-enabled builds, we only link against the minimal set of truly necessary
+system libraries and frameworks, which on Apple platforms boils down to
+`libobjc`, `Foundation`, `Accelerate`, `Metal`, etc.
+
+> [!WARNING]
+> **This has only been tested (both building and running) on macOS so far.**
+>
+> Upstream MLX supports Linux and NVIDIA hardware. I hope to support them in
+> the future, but this is completely untested as of right now.
+
+
 ## Usage
 ```zig
 const mlx = b.dependency("mlx", .{
@@ -20,9 +38,7 @@ const mlx = mlx.module("mlx");
 
 ## Future
 - Allow user to supply their own kernels;
-- Port kernels over to Zig and compile to ptx/spirv directly for portability;
-- Support CUDA and NCCL in a sovereign way by porting the `ioctl` stuff from
-  tinygrad over to Zig, this way we don't need to link against NVIDIA's stuff;
 - Investigate how possible it would be to have `jaccl` work on Linux targets by
   swapping Apple's custom `librdma.dylib` for the upstream `rdma-core` where it
   was apparently ported from and should have a very similar interface to;
+
