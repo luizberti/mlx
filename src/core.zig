@@ -39,6 +39,12 @@ pub fn metalAvailable() bool {
     return res;
 }
 
+/// Override where the Metal backend loads mlx.metallib from. Must be called before the
+/// first GPU op; without it MLX looks next to the executable (see README).
+pub fn setMetallibPath(path: [:0]const u8) Error!void {
+    try check(c.mlx_metal_set_metallib_path(path));
+}
+
 pub const DType = enum(c_uint) {
     bool = 0,
     uint8,

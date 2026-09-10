@@ -58,6 +58,42 @@ test "generated ops: nullable args, namespaces, multi-out" {
     try std.testing.expectApproxEqAbs(0.0, qd[1], 1e-6);
 }
 
+// Ops introduced in mlx 0.32: proves the regenerated surface (root fn, Array method, Scope
+// chain) and, on Metal, the new searchsorted kernel in the metallib.
+test "generated ops: new in mlx 0.32" {
+    const s: mlx.Stream = if (mlx.metalAvailable()) .gpu() else .cpu();
+    defer s.deinit();
+
+    const sorted: mlx.Array = .fromSlice(f32, &.{ 1, 3, 5, 7 }, &.{4});
+    defer sorted.deinit();
+    const values: mlx.Array = .fromSlice(f32, &.{ 0, 3, 6, 8 }, &.{4});
+    defer values.deinit();
+    const idx = try mlx.searchsorted(sorted, values, "left", s);
+    defer idx.deinit();
+    try idx.eval();
+    try std.testing.expectEqualSlices(u32, &.{ 0, 1, 3, 4 }, try idx.data(u32));
+
+    const m: mlx.Array = .fromSlice(f32, &.{ 1, 2, 3, 4 }, &.{ 2, 2 });
+    defer m.deinit();
+    const tr = try m.trace(s);
+    defer tr.deinit();
+    try std.testing.expectEqual(5.0, try tr.item(f32));
+
+    // flip is a negative-stride view; data() assumes row-major contiguity, so materialize it.
+    var scope: mlx.Scope = .init(std.testing.allocator);
+    defer scope.deinit();
+    const flipped = try scope.enter(try m.clone(), s).flip().contiguous(false).collect();
+    defer flipped.deinit();
+    try flipped.eval();
+    try std.testing.expectEqualSlices(f32, &.{ 4, 3, 2, 1 }, try flipped.data(f32));
+
+    const cpu: mlx.Stream = .cpu();
+    defer cpu.deinit();
+    const det = try mlx.linalg.det(m, cpu);
+    defer det.deinit();
+    try std.testing.expectApproxEqAbs(-2.0, try det.item(f32), 1e-5);
+}
+
 test "fromSlice, shape, data" {
     const s: mlx.Stream = if (mlx.metalAvailable()) .gpu() else .cpu();
     defer s.deinit();

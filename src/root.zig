@@ -15,6 +15,7 @@ pub const init = core.init;
 pub const lastError = core.lastError;
 pub const check = core.check;
 pub const metalAvailable = core.metalAvailable;
+pub const setMetallibPath = core.setMetallibPath;
 
 pub const Closure = transforms.Closure;
 pub const ValueAndGrad = transforms.ValueAndGrad;

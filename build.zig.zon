@@ -5,12 +5,12 @@
     .version = "0.0.1",
     .dependencies = .{
         .mlx = .{
-            .url = "git+https://github.com/ml-explore/mlx.git?ref=v0.31.2#68cf2fddd8de5edd8ab3d926391772b2e2cedad8",
-            .hash = "N-V-__8AAGkamgBpHapZtWSxTCvyaU1k3bHj1ZN4bOw4dSRC",
+            .url = "git+https://github.com/ml-explore/mlx.git?ref=v0.32.2#1f8e74e3f12f31365464a6867c6579f0e9b29d85",
+            .hash = "N-V-__8AAMCapACCd7ATiitRo4g1hGQI79apcOP9wx8CN-X-",
         },
         .mlxc = .{
-            .url = "git+https://github.com/ml-explore/mlx-c.git#fba4470b89073180056c9ea46c443051375f7399",
-            .hash = "N-V-__8AAOwcCgCGMf5BjoUXoCOz0o4rx5_jLUDStuAswvKy",
+            .url = "git+https://github.com/ml-explore/mlx-c.git#c74db5307cc8ce122f48d97ef951b30578674e7f",
+            .hash = "N-V-__8AAHGFCgCifY7bRae2RIwUHzpGUKZ38uSTFKYF3WFB",
         },
         .@"metal-cpp" = .{
             .url = "https://developer.apple.com/metal/cpp/files/metal-cpp_26.zip",
