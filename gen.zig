@@ -55,11 +55,11 @@ const keywords = [_][]const u8{
 
 // File-scope decls of the generated module; params and fn names must not shadow them.
 const reserved = [_][]const u8{
-    "core",         "cffi",           "std",       "Error", "DType",      "Array",
-    "Arrays",       "Stream",         "Scope",     "Norm",  "init",       "check",
-    "lastError",    "metalAvailable", "res0",      "res1",  "transforms", "Closure",
-    "ValueAndGrad", "eval",           "asyncEval", "vjp",   "jvp",        "valueAndGrad",
-    "checkpoint",   "compile",
+    "core",         "cffi",           "std",             "Error",  "DType",           "Array",
+    "Arrays",       "Stream",         "Scope",           "Norm",   "init",            "check",
+    "lastError",    "metalAvailable", "res0",            "res1",   "transforms",      "Closure",
+    "ValueAndGrad", "eval",           "asyncEval",       "vjp",    "jvp",             "valueAndGrad",
+    "checkpoint",   "compile",        "setMetallibPath", "Device", "getMetallibPath",
 };
 
 fn contains(set: []const []const u8, s: []const u8) bool {
@@ -375,7 +375,7 @@ fn emitNamespace(arena: std.mem.Allocator, w: *std.Io.Writer, ns: *const Namespa
     }
 
     if (ns.skipped.items.len > 0) {
-        try w.writeAll("// Not wrapped (unrecognized signature) — use the raw `c` import:\n");
+        try w.writeAll("// Not wrapped (unrecognized signature) — use the raw `cffi` import:\n");
         for (ns.skipped.items) |s| try w.print("//   {s}\n", .{s});
     }
 }

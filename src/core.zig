@@ -8,7 +8,7 @@ pub const c = @import("c");
 pub const Error = error{Mlx};
 
 threadlocal var error_len: usize = 0;
-threadlocal var error_buf: [512]u8 = undefined;
+threadlocal var error_buf: [4096]u8 = undefined; // JIT failures quote the compiler; keep them whole
 
 fn onError(msg: [*c]const u8, data: ?*anyopaque) callconv(.c) void {
     _ = data;
@@ -18,8 +18,8 @@ fn onError(msg: [*c]const u8, data: ?*anyopaque) callconv(.c) void {
 }
 
 /// Install the error handler that captures messages for lastError().
-/// Call once at startup; without it failed calls still return error.Mlx,
-/// but messages go to stderr (mlx-c default) instead of lastError().
+/// Call once at startup: mlx-c's default handler prints the message and
+/// exit(-1)s, so until this runs no failed call ever returns error.Mlx.
 pub fn init() void {
     c.mlx_set_error_handler(onError, null, null);
 }
@@ -37,6 +37,24 @@ pub fn metalAvailable() bool {
     var res = false;
     _ = c.mlx_metal_is_available(&res);
     return res;
+}
+
+/// Override where the Metal backend loads mlx.metallib from. Must be called before the
+/// first GPU op; without it MLX looks next to the executable (see README).
+pub fn setMetallibPath(path: [:0]const u8) Error!void {
+    try check(c.mlx_metal_set_metallib_path(path));
+}
+
+/// The override installed by setMetallibPath, copied into `buf`; empty when none is set
+/// (MLX then looks next to the executable). Fails on builds without the Metal backend.
+pub fn getMetallibPath(buf: []u8) (Error || error{NoSpaceLeft})![]const u8 {
+    var s = c.mlx_string_new();
+    defer _ = c.mlx_string_free(s);
+    try check(c.mlx_metal_get_metallib_path(&s));
+    const path = std.mem.span(c.mlx_string_data(s));
+    if (path.len > buf.len) return error.NoSpaceLeft;
+    @memcpy(buf[0..path.len], path);
+    return buf[0..path.len];
 }
 
 pub const DType = enum(c_uint) {
@@ -114,18 +132,56 @@ pub const Arrays = extern struct {
     }
 };
 
+pub const Device = enum(c_uint) {
+    cpu = c.MLX_CPU,
+    gpu = c.MLX_GPU,
+};
+
+/// Streams are thread-affine: MLX registers a stream's command encoder on the thread that
+/// created it, so evaluating on it from another thread fails with "There is no Stream(...)
+/// in current thread". Create per thread, or use threadUnsafe() for one shared across threads.
 pub const Stream = extern struct {
     h: c.mlx_stream,
 
-    pub fn gpu() Stream {
-        return .{ .h = c.mlx_default_gpu_stream_new() };
+    /// This thread's default GPU stream. Fails without a GPU backend, or when the Metal
+    /// library can't be loaded (see setMetallibPath).
+    pub fn gpu() Error!Stream {
+        return wrap(c.mlx_default_gpu_stream_new());
     }
 
-    pub fn cpu() Stream {
-        return .{ .h = c.mlx_default_cpu_stream_new() };
+    /// This thread's default CPU stream.
+    pub fn cpu() Error!Stream {
+        return wrap(c.mlx_default_cpu_stream_new());
+    }
+
+    /// A new stream on `device`, bound to the calling thread like the defaults.
+    pub fn init(device: Device) Error!Stream {
+        const dev = c.mlx_device_new_type(@intFromEnum(device), 0);
+        defer _ = c.mlx_device_free(dev);
+        return wrap(c.mlx_stream_new_device(dev));
+    }
+
+    /// A new stream on `device` usable from any thread: registered globally instead of per
+    /// thread. MLX applies no synchronization to it; data races on it are the caller's.
+    pub fn threadUnsafe(device: Device) Error!Stream {
+        const dev = c.mlx_device_new_type(@intFromEnum(device), 0);
+        defer _ = c.mlx_device_free(dev);
+        return wrap(c.mlx_stream_new_thread_unsafe(dev));
+    }
+
+    /// Block until everything queued on this stream has run; surfaces deferred errors.
+    pub fn synchronize(self: Stream) Error!void {
+        try check(c.mlx_synchronize(self.h));
     }
 
     pub fn deinit(self: Stream) void {
         _ = c.mlx_stream_free(self.h);
+    }
+
+    // mlx-c reports constructor failures through the error handler and hands back a null
+    // handle; surface that here instead of letting the next op fail with a confusing message.
+    fn wrap(h: c.mlx_stream) Error!Stream {
+        if (h.ctx == null) return error.Mlx;
+        return .{ .h = h };
     }
 };

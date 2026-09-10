@@ -22,13 +22,14 @@ const mlx = b.dependency("mlx", .{
     .target = target,
     .optimize = optimize,
     .metal = true,   // this is only supported on macOS.
-    .nax = true,     // whether to also precompile the NAX kernels (needs Metal toolchain >= 4.0).
+    .nax = true,     // whether to also precompile the NAX kernels (needs Metal 4 + macOS SDK >= 26.2 + a macOS >= 26.2 deployment target).
     .jit = false,    // whether to JIT compile the Metal kernels, or compile them ahead of time.
     .jaccl = false,  // enables the `jaccl` distributed backend (needs macOS >= 26.2)
     .ring = false,   // enables the `ring` distributed backend
+    .cpu_jit = false, // fuse compile()d CPU graphs via the host g++ at runtime (needs a C++ toolchain + writable TMPDIR)
 });
 
-// needed only if the `.metal` backend is enabled
+// needed only if the `.metal` backend is enabled (or use `mlx.setMetallibPath` at runtime)
 b.getInstallStep().dependOn(&b.addInstallBinFile(mlx.namedLazyPath("metallib"), "mlx.metallib").step);
 
 // MLX Zig module (raw C FFI available under `mlx.cffi`)

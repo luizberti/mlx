@@ -37,6 +37,13 @@ pub const Info = extern struct {
     pub fn dtype(self: @This()) DType {
         return @enumFromInt(cffi.mlx_array_dtype(self.handle));
     }
+
+    /// Element strides per axis (negative for reversed views like flip). Views only get
+    /// their real strides at eval; before that this is the row-major default for shape().
+    pub fn strides(self: @This()) []const i64 {
+        const n = cffi.mlx_array_ndim(self.handle);
+        return if (n == 0) &.{} else @as([*]const i64, @ptrCast(cffi.mlx_array_strides(self.handle)))[0..n];
+    }
 };
 
 pub fn scalar(v: anytype) @This() {
@@ -91,9 +98,16 @@ pub fn item(self: @This(), comptime T: type) Error!T {
     return v;
 }
 
-/// View of the evaluated array's buffer; call eval() first.
-/// Valid while the array is alive and unmodified.
-pub fn data(self: @This(), comptime T: type) Error![]const T {
+/// Evaluates if needed and returns a view of the buffer, valid while the array is alive and
+/// unmodified. Strided views (transpose, flip, stepped slices, broadcasts) fail with
+/// error.NotContiguous: their buffer isn't laid out the way shape() implies, so materialize
+/// one that is first, e.g. `x.contiguous(false, s)`. A dtype other than T is error.DType.
+pub fn data(self: @This(), comptime T: type) (Error || error{ NotContiguous, DType })![]const T {
+    try self.eval();
+    if (self.info.dtype() != DType.of(T)) return error.DType;
+    var row_major = false;
+    try check(cffi._mlx_array_is_row_contiguous(&row_major, self.info.handle));
+    if (!row_major) return error.NotContiguous;
     const p = dataFn(T)(self.info.handle);
     if (p == null) return error.Mlx;
     return p[0..cffi.mlx_array_size(self.info.handle)];

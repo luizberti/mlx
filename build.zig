@@ -11,10 +11,18 @@ pub fn build(b: *std.Build) void {
     const nax = b.option(bool, "nax", "Precompile NAX kernel variants (needs Metal toolchain >= 4.0)") orelse false;
     const ring = b.option(bool, "ring", "Distributed backend over TCP sockets") orelse false;
     const jaccl = b.option(bool, "jaccl", "Distributed backend over Thunderbolt RDMA (needs macOS >= 26.2)") orelse false;
+    const cpu_jit = b.option(bool, "cpu-jit", "Fuse compile()d CPU graphs into kernels built at runtime by the host g++ (needs a C++ toolchain and a writable TMPDIR at runtime)") orelse false;
     if (metal and target.result.os.tag != .macos) @panic("-Dmetal needs a macOS target");
     if (cuda) @panic("-Dcuda is not wired up yet");
     if (ring and target.result.os.tag == .windows) @panic("-Dring needs a POSIX target");
     if (jaccl and target.result.os.tag != .macos) @panic("-Djaccl needs a macOS target");
+
+    // Deployment target for the Metal toolchain, taken from the zig target's minimum macOS
+    // version (zig passes the same one to clang for the C++ objects). Upstream gates the NAX
+    // kernels on >= 26.2 at build time; below that the Metal compiler rejects them.
+    const macos_min: std.SemanticVersion = if (darwin) target.result.os.version_range.semver.min else .{ .major = 0, .minor = 0, .patch = 0 };
+    const version_min = b.fmt("-mmacosx-version-min={d}.{d}", .{ macos_min.major, macos_min.minor });
+    if (nax and macos_min.order(.{ .major = 26, .minor = 2, .patch = 0 }) == .lt) @panic("-Dnax needs a macOS >= 26.2 deployment target, e.g. -Dtarget=native-macos.26.2");
 
     const tests = b.step("test", "Run test suite");
     tests.dependOn(b.getInstallStep());
@@ -22,13 +30,6 @@ pub fn build(b: *std.Build) void {
     const fmt = b.dependency("fmt", .{});
     const mlx = b.dependency("mlx", .{});
     const mlxc = b.dependency("mlxc", .{});
-
-    const command = mlx.path("mlx/backend/cpu/make_compiled_preamble.sh");
-    const codegen = b.addSystemCommand(&.{command.getPath(b)});
-    const preamble = codegen.addOutputFileArg("compiled_preamble.cpp");
-    codegen.addArg("clang");
-    codegen.addDirectoryArg(mlx.path(""));
-    codegen.addArgs(&.{ "TRUE", if (target.result.cpu.arch == .x86_64) "x86_64" else "arm64" });
 
     // MARK: LIBMLX
     const libmlx = b.addLibrary(.{
@@ -42,7 +43,7 @@ pub fn build(b: *std.Build) void {
     });
     libmlx.root_module.addIncludePath(mlx.path(""));
     libmlx.root_module.addIncludePath(fmt.path("include"));
-    libmlx.root_module.addCMacro("MLX_VERSION", "\"0.31.2\"");
+    libmlx.root_module.addCMacro("MLX_VERSION", "\"0.32.2\"");
     libmlx.root_module.addCMacro("MLX_STATIC", "");
     if (darwin) {
         libmlx.root_module.addCMacro("MLX_USE_ACCELERATE", "");
@@ -54,8 +55,9 @@ pub fn build(b: *std.Build) void {
         b.fmt("\"{s}\"", .{b.getInstallPath(.bin, "mlx.metallib")}),
     );
 
-    // NOTE: In JIT mode NAX is always built and gated at runtime by `is_nax_available()`
-    if (metal and !jit and !nax) libmlx.root_module.addCMacro("MLX_METAL_NO_NAX", "");
+    // Without NAX, upstream defines this in both JIT and AOT mode: is_nax_available() returns
+    // false and jit_kernels.cpp supplies empty *_nax() preamble stubs to satisfy the linker.
+    if (metal and !nax) libmlx.root_module.addCMacro("MLX_METAL_NO_NAX", "");
 
     if (metal) if (b.lazyDependency("metal-cpp", .{})) |metalcpp| {
         libmlx.root_module.addIncludePath(metalcpp.path(""));
@@ -79,7 +81,7 @@ pub fn build(b: *std.Build) void {
 
     appendCpp(b, libmlx.root_module, mlx, "mlx", &.{}) catch @panic("append");
     appendCpp(b, libmlx.root_module, mlx, "mlx/backend/common", &.{}) catch @panic("append");
-    appendCpp(b, libmlx.root_module, mlx, "mlx/backend/cpu", &.{}) catch @panic("append");
+    appendCpp(b, libmlx.root_module, mlx, "mlx/backend/cpu", if (cpu_jit) &.{} else &.{"jit_compiler.cpp"}) catch @panic("append");
     appendCpp(b, libmlx.root_module, mlx, if (metal) "mlx/backend/gpu" else "mlx/backend/no_gpu", &.{}) catch @panic("append");
     if (metal) appendCpp(b, libmlx.root_module, mlx, "mlx/backend/metal", &.{ "no_metal.cpp", if (jit) "nojit_kernels.cpp" else "jit_kernels.cpp" }) catch @panic("append");
     if (!metal) libmlx.root_module.addCSourceFile(.{
@@ -108,8 +110,22 @@ pub fn build(b: *std.Build) void {
         .flags = cxxflags,
         .language = .cpp,
     });
-    libmlx.root_module.addCSourceFile(.{
-        .file = preamble,
+    if (cpu_jit) {
+        // The runtime JIT prepends this preprocessed copy of the CPU op headers to every kernel
+        // it compiles; the script needs a host clang on PATH.
+        const command = mlx.path("mlx/backend/cpu/make_compiled_preamble.sh");
+        const codegen = b.addSystemCommand(&.{command.getPath(b)});
+        const preamble = codegen.addOutputFileArg("compiled_preamble.cpp");
+        codegen.addArg("clang");
+        codegen.addDirectoryArg(mlx.path(""));
+        codegen.addArgs(&.{ "TRUE", if (target.result.cpu.arch == .x86_64) "x86_64" else "arm64" });
+        libmlx.root_module.addCSourceFile(.{
+            .file = preamble,
+            .flags = cxxflags,
+            .language = .cpp,
+        });
+    } else libmlx.root_module.addCSourceFile(.{
+        .file = b.path("src/no_cpu_jit.cpp"),
         .flags = cxxflags,
         .language = .cpp,
     });
@@ -119,6 +135,11 @@ pub fn build(b: *std.Build) void {
         .language = .cpp,
     });
     if (metal and jit) for (jit_preambles) |name| libmlx.root_module.addCSourceFile(.{
+        .file = embed(b, mlx, name),
+        .flags = cxxflags,
+        .language = .cpp,
+    });
+    if (metal and jit and nax) for (jit_nax_preambles) |name| libmlx.root_module.addCSourceFile(.{
         .file = embed(b, mlx, name),
         .flags = cxxflags,
         .language = .cpp,
@@ -134,10 +155,10 @@ pub fn build(b: *std.Build) void {
 
     // MARK: METAL KERNELS
     if (metal) {
-        const link = b.addSystemCommand(&.{ "xcrun", "-sdk", "macosx", "metal" });
-        for (kernels) |k| link.addFileArg(air(b, mlx, k));
-        if (!jit) for (nojit_kernels) |k| link.addFileArg(air(b, mlx, k));
-        if (!jit and nax) for (nax_kernels) |k| link.addFileArg(air(b, mlx, k));
+        const link = b.addSystemCommand(&.{ "xcrun", "-sdk", "macosx", "metal", version_min });
+        for (kernels) |k| link.addFileArg(air(b, mlx, k, version_min));
+        if (!jit) for (nojit_kernels) |k| link.addFileArg(air(b, mlx, k, version_min));
+        if (!jit and nax) for (nax_kernels) |k| link.addFileArg(air(b, mlx, k, version_min));
         link.addArg("-o");
         const metallib = link.addOutputFileArg("mlx.metallib");
         const install = b.addInstallBinFile(metallib, "mlx.metallib");
@@ -189,7 +210,7 @@ pub fn build(b: *std.Build) void {
     gen_run.addFileArg(b.path("src/root.zig"));
     gen_run.addFileArg(b.path("src/Scope.zig"));
     gen_run.addFileArg(b.path("src/Array.zig"));
-    for ([_][]const u8{ "ops.h", "linalg.h", "fft.h", "random.h" }) |h| {
+    for ([_][]const u8{ "ops.h", "linalg.h", "fft.h", "random.h", "fast.h" }) |h| {
         gen_run.addFileArg(mlxc.path(b.fmt("mlx/c/{s}", .{h})));
     }
     const wrapper_root = b.addWriteFiles();
@@ -206,12 +227,48 @@ pub fn build(b: *std.Build) void {
         .imports = &.{.{ .name = "c", .module = ffi }},
     });
 
+    const test_options = b.addOptions();
+    test_options.addOption(bool, "cpu_jit", cpu_jit);
     tests.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
         .target = target,
         .optimize = optimize,
         .root_source_file = b.path("test.zig"),
-        .imports = &.{.{ .name = "mlx", .module = wrapper }},
+        .imports = &.{
+            .{ .name = "mlx", .module = wrapper },
+            .{ .name = "build_options", .module = test_options.createModule() },
+        },
     }) })).step);
+
+    // MARK: CHECK
+    // `zig build check`: the whole matrix, one nested `zig build` per configuration, run one
+    // after another (they share zig-out and the caches). Linux entries only cross-compile.
+    const check = b.step("check", "Build and test every backend configuration");
+    const matrix: []const []const []const u8 = if (darwin) &.{
+        &.{"test"},
+        &.{ "test", "-Dmetal" },
+        &.{ "test", "-Dmetal", "-Dnax" },
+        &.{ "test", "-Dmetal", "-Djit" },
+        &.{ "test", "-Dmetal", "-Djit", "-Dnax" },
+        &.{ "-Dtarget=aarch64-linux-gnu", "-Dring" },
+        &.{ "-Dtarget=x86_64-linux-gnu", "-Dring" },
+    } else &.{
+        &.{"test"},
+        &.{ "test", "-Dring" },
+    };
+    var previous: ?*std.Build.Step = null;
+    for (matrix) |args| {
+        const run = b.addSystemCommand(&.{ b.graph.zig_exe, "build" });
+        run.addArgs(args);
+        if (b.cache_root.path) |path| run.addArgs(&.{ "--cache-dir", path });
+        if (b.graph.global_cache_root.path) |path| run.addArgs(&.{ "--global-cache-dir", path });
+        run.setCwd(b.path(""));
+        run.setName(b.fmt("zig build {s}", .{std.mem.join(b.allocator, " ", args) catch @panic("OOM")}));
+        run.has_side_effects = true;
+        run.stdio = .inherit;
+        if (previous) |step| run.step.dependOn(step);
+        previous = &run.step;
+    }
+    check.dependOn(previous.?);
 }
 
 // MARK: C++ SOURCES
@@ -253,10 +310,11 @@ fn embed(b: *std.Build, dep: *std.Build.Dependency, name: []const u8) std.Build.
 }
 
 // Compile one .metal kernel to a .air object for the metallib.
-fn air(b: *std.Build, dep: *std.Build.Dependency, kernel: []const u8) std.Build.LazyPath {
+fn air(b: *std.Build, dep: *std.Build.Dependency, kernel: []const u8, version_min: []const u8) std.Build.LazyPath {
     const run = b.addSystemCommand(&.{
-        "xcrun", "-sdk",    "macosx",         "metal",                 "-x",                    "metal",
-        "-Wall", "-Wextra", "-fno-fast-math", "-Wno-c++17-extensions", "-Wno-c++20-extensions", "-c",
+        "xcrun",     "-sdk",    "macosx",         "metal",                 "-x",                    "metal",
+        "-Wall",     "-Wextra", "-fno-fast-math", "-Wno-c++17-extensions", "-Wno-c++20-extensions", "-Wmetal-addr-spaces",
+        version_min, "-c",
     });
     run.addFileArg(dep.path(b.fmt("mlx/backend/metal/kernels/{s}.metal", .{kernel})));
     run.addPrefixedDirectoryArg("-I", dep.path(""));
@@ -287,28 +345,40 @@ const preambles = [_][]const u8{
 
 // Extra preambles embedded in JIT mode: kernels are runtime-compiled from these instead of the metallib.
 const jit_preambles = [_][]const u8{
-    "arange",                                  "copy",                                     "unary",                                    "binary",                                      "binary_two",
-    "fft",                                     "logsumexp",                                "ternary",                                  "softmax",                                     "scan",
-    "sort",                                    "reduce",                                   "quantized_utils",                          "quantized",                                   "fp_quantized",
-    "gemv_masked",                             "quantized_nax",                            "fp_quantized_nax",                         "steel/gemm/gemm",                             "steel/gemm/gemm_nax",
-    "steel/gemm/kernels/steel_gemm_fused",     "steel/gemm/kernels/steel_gemm_masked",     "steel/gemm/kernels/steel_gemm_gather",     "steel/gemm/kernels/steel_gemm_splitk",        "steel/gemm/kernels/steel_gemm_segmented",
-    "steel/gemm/kernels/steel_gemm_fused_nax", "steel/gemm/kernels/steel_gemm_gather_nax", "steel/gemm/kernels/steel_gemm_splitk_nax", "steel/gemm/kernels/steel_gemm_segmented_nax", "steel/conv/conv",
-    "steel/conv/kernels/steel_conv",           "steel/conv/kernels/steel_conv_3d",         "steel/conv/kernels/steel_conv_general",    "steel/attn/kernels/steel_attention",          "steel/attn/kernels/steel_attention_nax",
+    "arange",                               "copy",                                 "unary",                                 "binary",                                  "binary_two",
+    "fft",                                  "logsumexp",                            "ternary",                               "softmax",                                 "scan",
+    "sort",                                 "searchsorted",                         "reduce",                                "quantized_utils",                         "quantized",
+    "fp_quantized",                         "gemv",                                 "gemv_masked",                           "steel/gemm/gemm",                         "steel/gemm/kernels/steel_gemm_fused",
+    "steel/gemm/kernels/steel_gemm_masked", "steel/gemm/kernels/steel_gemm_gather", "steel/gemm/kernels/steel_gemm_splitk",  "steel/gemm/kernels/steel_gemm_segmented", "steel/conv/conv",
+    "steel/conv/kernels/steel_conv",        "steel/conv/kernels/steel_conv_3d",     "steel/conv/kernels/steel_conv_general", "steel/attn/kernels/steel_attention",
+};
+
+// NAX preambles embedded in JIT mode only with -Dnax (upstream gates these on Metal 4 + SDK 26.2).
+const jit_nax_preambles = [_][]const u8{
+    "quantized_nax",
+    "fp_quantized_nax",
+    "steel/gemm/gemm_nax",
+    "steel/gemm/kernels/steel_gemm_fused_nax",
+    "steel/gemm/kernels/steel_gemm_gather_nax",
+    "steel/gemm/kernels/steel_gemm_splitk_nax",
+    "steel/gemm/kernels/steel_gemm_segmented_nax",
+    "steel/attn/kernels/steel_attention_nax",
 };
 
 // Metallib kernels precompiled in every mode (fence needs metal>=320).
 const kernels = [_][]const u8{
-    "arg_reduce", "conv", "gemv",                         "layer_norm", "random",
+    "arg_reduce", "conv", "dot",                          "layer_norm", "random",
     "rms_norm",   "rope", "scaled_dot_product_attention", "fence",
 };
 
 // Additional kernels precompiled when not in JIT mode.
 const nojit_kernels = [_][]const u8{
-    "arange",                               "binary",                               "binary_two",                              "copy",                                "fft",
-    "reduce",                               "quantized",                            "fp_quantized",                            "scan",                                "softmax",
-    "logsumexp",                            "sort",                                 "ternary",                                 "unary",                               "gemv_masked",
-    "steel/conv/kernels/steel_conv",        "steel/conv/kernels/steel_conv_3d",     "steel/conv/kernels/steel_conv_general",   "steel/gemm/kernels/steel_gemm_fused", "steel/gemm/kernels/steel_gemm_gather",
-    "steel/gemm/kernels/steel_gemm_masked", "steel/gemm/kernels/steel_gemm_splitk", "steel/gemm/kernels/steel_gemm_segmented", "steel/attn/kernels/steel_attention",
+    "arange",                              "binary",                               "binary_two",                           "copy",                                 "fft",
+    "reduce",                              "quantized",                            "fp_quantized",                         "scan",                                 "softmax",
+    "logsumexp",                           "searchsorted",                         "sort",                                 "ternary",                              "unary",
+    "gemv",                                "gemv_masked",                          "steel/conv/kernels/steel_conv",        "steel/conv/kernels/steel_conv_3d",     "steel/conv/kernels/steel_conv_general",
+    "steel/gemm/kernels/steel_gemm_fused", "steel/gemm/kernels/steel_gemm_gather", "steel/gemm/kernels/steel_gemm_masked", "steel/gemm/kernels/steel_gemm_splitk", "steel/gemm/kernels/steel_gemm_segmented",
+    "steel/attn/kernels/steel_attention",
 };
 
 // NAX (neural accelerator) kernel variants, runtime-gated by is_nax_available().

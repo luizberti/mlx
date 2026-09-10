@@ -10,11 +10,14 @@ pub const DType = core.DType;
 pub const Array = core.Array;
 pub const Arrays = core.Arrays;
 pub const Stream = core.Stream;
+pub const Device = core.Device;
 pub const Scope = @import("Scope.zig");
 pub const init = core.init;
 pub const lastError = core.lastError;
 pub const check = core.check;
 pub const metalAvailable = core.metalAvailable;
+pub const setMetallibPath = core.setMetallibPath;
+pub const getMetallibPath = core.getMetallibPath;
 
 pub const Closure = transforms.Closure;
 pub const ValueAndGrad = transforms.ValueAndGrad;
