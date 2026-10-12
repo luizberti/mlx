@@ -92,7 +92,7 @@ pub const DType = enum(c_uint) {
     }
 
     pub fn size(self: DType) usize {
-        return c.mlx_dtype_size(@intFromEnum(self));
+        return c.mlx_dtype_size(@backingInt(self));
     }
 };
 
@@ -156,7 +156,7 @@ pub const Stream = extern struct {
 
     /// A new stream on `device`, bound to the calling thread like the defaults.
     pub fn init(device: Device) Error!Stream {
-        const dev = c.mlx_device_new_type(@intFromEnum(device), 0);
+        const dev = c.mlx_device_new_type(@backingInt(device), 0);
         defer _ = c.mlx_device_free(dev);
         return wrap(c.mlx_stream_new_device(dev));
     }
@@ -164,7 +164,7 @@ pub const Stream = extern struct {
     /// A new stream on `device` usable from any thread: registered globally instead of per
     /// thread. MLX applies no synchronization to it; data races on it are the caller's.
     pub fn threadUnsafe(device: Device) Error!Stream {
-        const dev = c.mlx_device_new_type(@intFromEnum(device), 0);
+        const dev = c.mlx_device_new_type(@backingInt(device), 0);
         defer _ = c.mlx_device_free(dev);
         return wrap(c.mlx_stream_new_thread_unsafe(dev));
     }

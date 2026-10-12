@@ -298,9 +298,9 @@ fn writeArg(w: *std.Io.Writer, kind: Kind, name: []const u8) !void {
         .slice_i32_opt => try w.print("if ({s}) |{s}_v| {s}_v.ptr else null, if ({s}) |{s}_v| {s}_v.len else 0", .{ name, name, name, name, name, name }),
         .string => try w.print("{s}.ptr", .{name}),
         .scalar_i32, .scalar_usize, .scalar_bool, .scalar_f32, .scalar_f64, .scalar_u64 => try w.print("{s}", .{name}),
-        .dtype, .fft_norm => try w.print("@intFromEnum({s})", .{name}),
+        .dtype, .fft_norm => try w.print("@backingInt({s})", .{name}),
         .opt_i32, .opt_f32 => try w.print(".{{ .value = {s} orelse 0, .has_value = {s} != null }}", .{ name, name }),
-        .opt_dtype => try w.print(".{{ .value = if ({s}) |{s}_v| @intFromEnum({s}_v) else 0, .has_value = {s} != null }}", .{ name, name, name, name }),
+        .opt_dtype => try w.print(".{{ .value = if ({s}) |{s}_v| @backingInt({s}_v) else 0, .has_value = {s} != null }}", .{ name, name, name, name }),
         .out_array, .out_arrays => unreachable,
     }
 }
@@ -491,7 +491,7 @@ pub fn main(init: std.process.Init) !void {
 
     var namespaces: std.ArrayList(Namespace) = .empty;
     for (args[7..]) |path| {
-        const base = std.fs.path.basename(path);
+        const base = std.Io.Dir.path.basename(path);
         const name = std.mem.cutSuffix(u8, base, ".h") orelse base;
         var ns: Namespace = .{ .name = name };
         const text = try std.Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(8 << 20));

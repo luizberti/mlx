@@ -1,7 +1,7 @@
 .{
     .name = .mlx,
     .fingerprint = 0x28d85cc4f0c56771,
-    .minimum_zig_version = "0.16.0",
+    .minimum_zig_version = "0.17.0",
     .version = "0.0.1",
     .dependencies = .{
         .mlx = .{
@@ -30,6 +30,10 @@
             .url = "https://github.com/nlohmann/json/releases/download/v3.11.3/json.tar.xz",
             .hash = "N-V-__8AAOedHADB-3e14vvAh_b1waHxfGtsxx3daxAj9Ps3",
             .lazy = true,
+        },
+        .translate_c = .{
+            .url = "git+https://codeberg.org/ziglang/translate-c?ref=zig-0.17.x#f978dca0f2b2a782d06591989e80aae7c74d0183",
+            .hash = "translate_c-2.0.1-Q_BUWmVOBwDWdxpDb7n6-LpMznKteZvXbL_4r6DxB2_d",
         },
     },
     .paths = .{""},

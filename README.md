@@ -22,9 +22,9 @@ const mlx = b.dependency("mlx", .{
     .target = target,
     .optimize = optimize,
     .metal = true,   // this is only supported on macOS.
-    .nax = true,     // whether to also precompile the NAX kernels (needs Metal 4 + macOS SDK >= 26.2 + a macOS >= 26.2 deployment target).
+    .nax = true,     // whether to also precompile the NAX kernels (needs the Metal 4 toolchain).
     .jit = false,    // whether to JIT compile the Metal kernels, or compile them ahead of time.
-    .jaccl = false,  // enables the `jaccl` distributed backend (needs macOS >= 26.2)
+    .jaccl = false,  // enables the `jaccl` distributed backend
     .ring = false,   // enables the `ring` distributed backend
     .cpu_jit = false, // fuse compile()d CPU graphs via the host g++ at runtime (needs a C++ toolchain + writable TMPDIR)
 });

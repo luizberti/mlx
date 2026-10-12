@@ -1,4 +1,5 @@
 const std = @import("std");
+const Translator = @import("translate_c").Translator;
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
@@ -10,22 +11,24 @@ pub fn build(b: *std.Build) void {
     const jit = b.option(bool, "jit", "JIT Metal kernels at runtime (smaller metallib)") orelse false;
     const nax = b.option(bool, "nax", "Precompile NAX kernel variants (needs Metal toolchain >= 4.0)") orelse false;
     const ring = b.option(bool, "ring", "Distributed backend over TCP sockets") orelse false;
-    const jaccl = b.option(bool, "jaccl", "Distributed backend over Thunderbolt RDMA (needs macOS >= 26.2)") orelse false;
+    const jaccl = b.option(bool, "jaccl", "Distributed backend over Thunderbolt RDMA") orelse false;
     const cpu_jit = b.option(bool, "cpu-jit", "Fuse compile()d CPU graphs into kernels built at runtime by the host g++ (needs a C++ toolchain and a writable TMPDIR at runtime)") orelse false;
     if (metal and target.result.os.tag != .macos) @panic("-Dmetal needs a macOS target");
     if (cuda) @panic("-Dcuda is not wired up yet");
     if (ring and target.result.os.tag == .windows) @panic("-Dring needs a POSIX target");
     if (jaccl and target.result.os.tag != .macos) @panic("-Djaccl needs a macOS target");
 
-    // Deployment target for the Metal toolchain, taken from the zig target's minimum macOS
-    // version (zig passes the same one to clang for the C++ objects). Upstream gates the NAX
-    // kernels on >= 26.2 at build time; below that the Metal compiler rejects them.
+    // macOS builds are native-only: zig wires up the SDK (frameworks, headers) only when the target's
+    // OS is native, so any explicit macOS target (even native-macos.27.0) fails to find Accelerate.
+    // macOS 27+ only, which also clears upstream's >= 26.2 gates for NAX and jaccl.
+    if (darwin and !target.query.isNativeOs()) @panic("macOS builds must use the native target (zig only finds the SDK for it); drop the -Dtarget OS part");
+    // Deployment target for the Metal toolchain: the host's macOS version, which zig also passes to
+    // clang for the C++ objects.
     const macos_min: std.SemanticVersion = if (darwin) target.result.os.version_range.semver.min else .{ .major = 0, .minor = 0, .patch = 0 };
+    if (darwin and macos_min.major < 27) @panic("mal supports macOS 27+ only");
     const version_min = b.fmt("-mmacosx-version-min={d}.{d}", .{ macos_min.major, macos_min.minor });
-    if (nax and macos_min.order(.{ .major = 26, .minor = 2, .patch = 0 }) == .lt) @panic("-Dnax needs a macOS >= 26.2 deployment target, e.g. -Dtarget=native-macos.26.2");
 
     const tests = b.step("test", "Run test suite");
-    tests.dependOn(b.getInstallStep());
 
     const fmt = b.dependency("fmt", .{});
     const mlx = b.dependency("mlx", .{});
@@ -50,10 +53,22 @@ pub fn build(b: *std.Build) void {
         libmlx.root_module.addCMacro("ACCELERATE_NEW_LAPACK", "");
     }
     libmlx.root_module.addCMacro("FMT_HEADER_ONLY", "");
-    if (metal) libmlx.root_module.addCMacro(
-        "METAL_PATH",
-        b.fmt("\"{s}\"", .{b.getInstallPath(.bin, "mlx.metallib")}),
-    );
+    if (metal) {
+        // device.cpp falls back to METAL_PATH when no metallib sits next to the binary. The
+        // install prefix is only known at make time, so a wrapper TU defines it and includes
+        // the original (skipped by the crawl below).
+        const wrap = b.addSystemCommand(&.{
+            "sh", "-c",
+            \\printf '#define METAL_PATH "%s/mlx.metallib"\n#include "mlx/backend/metal/device.cpp"\n' "$0" > "$1"
+            ,
+        });
+        wrap.addDirectoryArg2(b.graph.path(.install_bin, ""), .{ .make_absolute = true });
+        libmlx.root_module.addCSourceFile(.{
+            .file = wrap.addOutputFileArg("device.cpp"),
+            .flags = cxxflags,
+            .language = .cpp,
+        });
+    }
 
     // Without NAX, upstream defines this in both JIT and AOT mode: is_nax_available() returns
     // false and jit_kernels.cpp supplies empty *_nax() preamble stubs to satisfy the linker.
@@ -83,7 +98,7 @@ pub fn build(b: *std.Build) void {
     appendCpp(b, libmlx.root_module, mlx, "mlx/backend/common", &.{}) catch @panic("append");
     appendCpp(b, libmlx.root_module, mlx, "mlx/backend/cpu", if (cpu_jit) &.{} else &.{"jit_compiler.cpp"}) catch @panic("append");
     appendCpp(b, libmlx.root_module, mlx, if (metal) "mlx/backend/gpu" else "mlx/backend/no_gpu", &.{}) catch @panic("append");
-    if (metal) appendCpp(b, libmlx.root_module, mlx, "mlx/backend/metal", &.{ "no_metal.cpp", if (jit) "nojit_kernels.cpp" else "jit_kernels.cpp" }) catch @panic("append");
+    if (metal) appendCpp(b, libmlx.root_module, mlx, "mlx/backend/metal", &.{ "no_metal.cpp", "device.cpp", if (jit) "nojit_kernels.cpp" else "jit_kernels.cpp" }) catch @panic("append");
     if (!metal) libmlx.root_module.addCSourceFile(.{
         .file = mlx.path("mlx/backend/metal/no_metal.cpp"),
         .flags = cxxflags,
@@ -113,8 +128,8 @@ pub fn build(b: *std.Build) void {
     if (cpu_jit) {
         // The runtime JIT prepends this preprocessed copy of the CPU op headers to every kernel
         // it compiles; the script needs a host clang on PATH.
-        const command = mlx.path("mlx/backend/cpu/make_compiled_preamble.sh");
-        const codegen = b.addSystemCommand(&.{command.getPath(b)});
+        const codegen = b.addSystemCommand(&.{"bash"});
+        codegen.addFileArg(mlx.path("mlx/backend/cpu/make_compiled_preamble.sh"));
         const preamble = codegen.addOutputFileArg("compiled_preamble.cpp");
         codegen.addArg("clang");
         codegen.addDirectoryArg(mlx.path(""));
@@ -180,27 +195,27 @@ pub fn build(b: *std.Build) void {
     libmlxc.root_module.addIncludePath(mlx.path(""));
     appendCpp(b, libmlxc.root_module, mlxc, "mlx/c", &.{}) catch @panic("append");
     libmlxc.root_module.linkLibrary(libmlx);
+    libmlxc.root_module.link_libcpp = true;
     b.installArtifact(libmlxc);
 
     // MARK: MLX MODULE
     const ffi = blk: {
-        const tc = b.addTranslateC(.{
+        const tc: Translator = .init(b.dependency("translate_c", .{}), .{
+            .c_source_file = mlxc.path("mlx/c/mlx.h"),
             .target = target,
             .optimize = optimize,
-            .root_source_file = mlxc.path("mlx/c/mlx.h"),
         });
         tc.addIncludePath(mlxc.path(""));
-        const mod = tc.createModule();
-        mod.linkLibrary(libmlxc);
-        mod.link_libcpp = true;
-        break :blk mod;
+        tc.linkLibrary(libmlxc);
+        tc.mod.link_libcpp = true;
+        break :blk tc.mod;
     };
     const gen = b.addExecutable(.{
         .name = "gen",
         .root_module = b.createModule(.{
             .root_source_file = b.path("gen.zig"),
             .target = b.graph.host,
-            .optimize = .Debug,
+            .optimize = .debug,
         }),
     });
     const gen_run = b.addRunArtifact(gen);
@@ -229,7 +244,7 @@ pub fn build(b: *std.Build) void {
 
     const test_options = b.addOptions();
     test_options.addOption(bool, "cpu_jit", cpu_jit);
-    tests.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
+    const run_tests = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
         .target = target,
         .optimize = optimize,
         .root_source_file = b.path("test.zig"),
@@ -237,7 +252,10 @@ pub fn build(b: *std.Build) void {
             .{ .name = "mlx", .module = wrapper },
             .{ .name = "build_options", .module = test_options.createModule() },
         },
-    }) })).step);
+    }) }));
+    // The test binary finds mlx.metallib via METAL_PATH, so it must be installed before the run.
+    run_tests.step.dependOn(b.getInstallStep());
+    tests.dependOn(&run_tests.step);
 
     // MARK: CHECK
     // `zig build check`: the whole matrix, one nested `zig build` per configuration, run one
@@ -259,8 +277,8 @@ pub fn build(b: *std.Build) void {
     for (matrix) |args| {
         const run = b.addSystemCommand(&.{ b.graph.zig_exe, "build" });
         run.addArgs(args);
-        if (b.cache_root.path) |path| run.addArgs(&.{ "--cache-dir", path });
-        if (b.graph.global_cache_root.path) |path| run.addArgs(&.{ "--global-cache-dir", path });
+        run.addArg("--cache-dir");
+        run.addDirectoryArg2(.cache_root, .{ .make_absolute = true });
         run.setCwd(b.path(""));
         run.setName(b.fmt("zig build {s}", .{std.mem.join(b.allocator, " ", args) catch @panic("OOM")}));
         run.has_side_effects = true;
@@ -277,13 +295,17 @@ pub fn build(b: *std.Build) void {
 // (M2+), flipping mlx's half_types.h to native __bf16, which lacks the cross-type conversions
 // array.h needs. libmlx and libmlxc must agree — the choice is ABI-visible in mangled names.
 // Only the preprocessor branch is pinned; codegen may still emit bf16 instructions.
-const cxxflags = &[_][]const u8{ "-std=c++20", "-U__ARM_FEATURE_BF16" };
+// gnu++20 matches upstream (CMake leaves CXX_EXTENSIONS on) and is required with zig 0.17: its
+// libc++ <float.h> wrapper is include-guarded, so once a TU includes <float.h> (mlx/c/array.h does,
+// before <complex.h>) the macOS SDK's <math.h> can't re-include it for INFINITY/NAN, and clang's
+// <float.h> only defines those itself when __STRICT_ANSI__ is off.
+const cxxflags = &[_][]const u8{ "-std=gnu++20", "-U__ARM_FEATURE_BF16" };
 
 // Non-recursive crawl of dep's `sub` dir, adding each top-level `.cpp` to `mod` (minus `skip`).
 fn appendCpp(b: *std.Build, mod: *std.Build.Module, dep: *std.Build.Dependency, sub: []const u8, skip: []const []const u8) !void {
     const io = b.graph.io;
-    const br = dep.builder.build_root.handle;
-    var dir = try br.openDir(io, sub, .{ .iterate = true });
+    b.dependOnDirectoryContents(dep.path(sub));
+    var dir = try dep.builder.root.openDir(io, sub, .{ .iterate = true });
     defer dir.close(io);
 
     var cursor = dir.iterate();
@@ -306,7 +328,7 @@ fn embed(b: *std.Build, dep: *std.Build.Dependency, name: []const u8) std.Build.
     run.addArg("clang");
     run.addDirectoryArg(dep.path(""));
     run.addArg(name);
-    return out.path(b, b.fmt("{s}.cpp", .{std.fs.path.basename(name)}));
+    return out.path(b, b.fmt("{s}.cpp", .{std.Io.Dir.path.basename(name)}));
 }
 
 // Compile one .metal kernel to a .air object for the metallib.
@@ -319,7 +341,7 @@ fn air(b: *std.Build, dep: *std.Build.Dependency, kernel: []const u8, version_mi
     run.addFileArg(dep.path(b.fmt("mlx/backend/metal/kernels/{s}.metal", .{kernel})));
     run.addPrefixedDirectoryArg("-I", dep.path(""));
     run.addArg("-o");
-    return run.addOutputFileArg(b.fmt("{s}.air", .{std.fs.path.basename(kernel)}));
+    return run.addOutputFileArg(b.fmt("{s}.air", .{std.Io.Dir.path.basename(kernel)}));
 }
 
 const mlx_sources = [_][]const u8{

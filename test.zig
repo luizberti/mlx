@@ -273,7 +273,7 @@ test "compiled closure fuses an elementwise chain through the runtime JIT" {
         // GPU-default build fuses CPU-stream graphs too and can only refuse them at eval.
         if (pick == mlx.Stream.cpu and !build_options.cpu_jit and mlx.metalAvailable()) {
             try std.testing.expectError(error.Mlx, y.item(f32));
-            try std.testing.expect(std.mem.indexOf(u8, mlx.lastError(), "CPU kernel JIT is disabled") != null);
+            try std.testing.expect(std.mem.find(u8, mlx.lastError(), "CPU kernel JIT is disabled") != null);
         } else {
             try std.testing.expectEqual(-12.0, try y.item(f32));
         }
@@ -390,7 +390,7 @@ test "Stream constructors surface backend failures; getMetallibPath" {
         try std.testing.expectEqualStrings("", try mlx.getMetallibPath(&buf)); // no override installed
     } else {
         try std.testing.expectError(error.Mlx, mlx.Stream.gpu());
-        try std.testing.expect(std.mem.indexOf(u8, mlx.lastError(), "gpu") != null);
+        try std.testing.expect(std.mem.find(u8, mlx.lastError(), "gpu") != null);
         try std.testing.expectError(error.Mlx, mlx.Stream.init(.gpu));
         try std.testing.expectError(error.Mlx, mlx.getMetallibPath(&buf));
     }
@@ -424,7 +424,7 @@ test "streams are thread-affine; Stream.threadUnsafe is not" {
             const y = try mlx.add(x, x, self.affine); // graph building is fine ...
             defer y.deinit();
             try std.testing.expectError(error.Mlx, y.eval()); // ... evaluating is not
-            try std.testing.expect(std.mem.indexOf(u8, mlx.lastError(), "current thread") != null);
+            try std.testing.expect(std.mem.find(u8, mlx.lastError(), "current thread") != null);
 
             const z = try mlx.add(x, x, self.shared);
             defer z.deinit();
@@ -566,7 +566,7 @@ test "Scope chain: failure poisons, take surfaces it" {
     defer scope.deinit();
     // add fails (broadcast), square no-ops on the poisoned result
     try std.testing.expectError(error.Mlx, scope.enter(x, s).add(bad).square().collect());
-    try std.testing.expect(std.mem.indexOf(u8, mlx.lastError(), "broadcast") != null);
+    try std.testing.expect(std.mem.find(u8, mlx.lastError(), "broadcast") != null);
 }
 
 test "lastError captures failure message" {
@@ -583,5 +583,5 @@ test "lastError captures failure message" {
     var res: mlx.Array = .{ .info = .{ .handle = mlx.cffi.mlx_array_new() } };
     defer res.deinit();
     try std.testing.expectError(error.Mlx, mlx.check(mlx.cffi.mlx_add(&res.info.handle, a.info.handle, b.info.handle, s.h)));
-    try std.testing.expect(std.mem.indexOf(u8, mlx.lastError(), "broadcast") != null);
+    try std.testing.expect(std.mem.find(u8, mlx.lastError(), "broadcast") != null);
 }

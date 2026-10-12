@@ -35,7 +35,7 @@ pub const Info = extern struct {
     }
 
     pub fn dtype(self: @This()) DType {
-        return @enumFromInt(cffi.mlx_array_dtype(self.handle));
+        return @fromBackingInt(cffi.mlx_array_dtype(self.handle));
     }
 
     /// Element strides per axis (negative for reversed views like flip). Views only get
@@ -62,7 +62,7 @@ pub fn fromSlice(comptime T: type, items: []const T, shape: []const i32) @This()
         @ptrCast(items.ptr),
         shape.ptr,
         @intCast(shape.len),
-        @intFromEnum(DType.of(T)),
+        @backingInt(DType.of(T)),
     ) } };
 }
 
